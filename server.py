@@ -42,10 +42,10 @@ def next_match_time(tournament):
     if candidate <= local:
         candidate += datetime.timedelta(minutes=interval)
     # Daily operating window: 1:00 PM through the final slot before 9:00 PM.
-    if candidate.hour < 13:
+    if candidate.hour < 12:
         candidate = datetime.datetime.combine(day, datetime.time(13, 0), tzinfo=local.tzinfo)
-    elif candidate.hour >= 21:
-        candidate = datetime.datetime.combine(day + datetime.timedelta(days=1), datetime.time(13, 0), tzinfo=local.tzinfo)
+    elif candidate.hour >= 20:
+        candidate = datetime.datetime.combine(day + datetime.timedelta(days=1), datetime.time(12, 0), tzinfo=local.tzinfo)
     return candidate.isoformat(timespec='seconds')
 
 def parse_iso(value):
@@ -197,10 +197,10 @@ class H(BaseHTTPRequestHandler):
                 candidate=datetime.datetime.combine(local.date(),datetime.time(local.hour,minute),tzinfo=local.tzinfo)
                 if candidate <= local:
                     candidate += datetime.timedelta(minutes=interval)
-                if candidate.hour < 13:
-                    candidate=datetime.datetime.combine(candidate.date(),datetime.time(13,0),tzinfo=local.tzinfo)
-                elif candidate.hour >= 21:
-                    candidate=datetime.datetime.combine(candidate.date()+datetime.timedelta(days=1),datetime.time(13,0),tzinfo=local.tzinfo)
+                if candidate.hour < 12:
+                    candidate=datetime.datetime.combine(candidate.date(),datetime.time(12,0),tzinfo=local.tzinfo)
+                elif candidate.hour >= 20:
+                    candidate=datetime.datetime.combine(candidate.date()+datetime.timedelta(days=1),datetime.time(12,0),tzinfo=local.tzinfo)
                 for _ in range(4):
                     scheduled=candidate.isoformat(timespec='seconds')
                     joined=matches.count_documents({'tournament':t,'scheduled_at':scheduled})
@@ -284,14 +284,14 @@ class H(BaseHTTPRequestHandler):
                 candidate=datetime.datetime.combine(local.date(),datetime.time(local.hour,minute),tzinfo=local.tzinfo)
                 if candidate <= local:
                     candidate += datetime.timedelta(minutes=interval)
-                if candidate.hour < 13:
-                    candidate=datetime.datetime.combine(candidate.date(),datetime.time(13,0),tzinfo=local.tzinfo)
-                elif candidate.hour >= 21:
-                    candidate=datetime.datetime.combine(candidate.date()+datetime.timedelta(days=1),datetime.time(13,0),tzinfo=local.tzinfo)
+                if candidate.hour < 12:
+                    candidate=datetime.datetime.combine(candidate.date(),datetime.time(12,0),tzinfo=local.tzinfo)
+                elif candidate.hour >= 20:
+                    candidate=datetime.datetime.combine(candidate.date()+datetime.timedelta(days=1),datetime.time(12,0),tzinfo=local.tzinfo)
                 for _ in range(12):
                     add_group(t,candidate.isoformat(timespec='seconds'))
                     candidate += datetime.timedelta(minutes=interval)
-                    if candidate.hour >= 21:
+                    if candidate.hour >= 20:
                         break
 
             # Merge every actual player match, including older slots, into the timetable.
@@ -461,10 +461,10 @@ class H(BaseHTTPRequestHandler):
                 now_local=datetime.datetime.now().astimezone()
                 # Preserve the match slot timezone and operating window while looking for the next non-full slot.
                 while True:
-                    if candidate.hour < 13:
-                        candidate=datetime.datetime.combine(candidate.date(),datetime.time(13,0),tzinfo=candidate.tzinfo)
-                    elif candidate.hour >= 21:
-                        candidate=datetime.datetime.combine(candidate.date()+datetime.timedelta(days=1),datetime.time(13,0),tzinfo=candidate.tzinfo)
+                    if candidate.hour < 12:
+                        candidate=datetime.datetime.combine(candidate.date(),datetime.time(12,0),tzinfo=candidate.tzinfo)
+                    elif candidate.hour >= 20:
+                        candidate=datetime.datetime.combine(candidate.date()+datetime.timedelta(days=1),datetime.time(12,0),tzinfo=candidate.tzinfo)
                     slot=candidate.isoformat(timespec='seconds')
                     occupied=matches.count_documents({'tournament':t,'scheduled_at':slot,'_id':{'$ne':mid}})
                     if occupied < match_capacity(t): break
