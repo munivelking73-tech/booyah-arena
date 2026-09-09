@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rules — BOOYAH ARENA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700;800;900&family=DM+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#edf2ff;--muted:#97a1b8;--orange:#ff6b1a;--cyan:#29d6ff;--bg:#090b12;--panel:#121722;--line:rgba(255,255,255,.1)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:'DM Sans',sans-serif}body:before{content:'';position:fixed;inset:0;pointer-events:none;background:radial-gradient(circle at 90% 0,rgba(255,107,26,.14),transparent 28%),radial-gradient(circle at 10% 80%,rgba(41,214,255,.07),transparent 24%)}
+.shell{max-width:1100px;margin:auto;padding:0 5vw 50px;position:relative}header{height:76px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}.brand{font:900 26px 'Barlow Condensed';letter-spacing:.04em}.mark{display:inline-block;width:20px;height:20px;margin-right:8px;background:var(--orange);clip-path:polygon(50% 0,100% 22%,82% 100%,21% 82%,0 30%);vertical-align:-2px}nav{display:flex;gap:25px}nav a{color:var(--muted);text-decoration:none;font-size:12px;font-weight:700}nav a:hover,nav a.active{color:#fff}.back{background:var(--orange);color:#fff;text-decoration:none;padding:10px 14px;font-size:11px;font-weight:800}
+.hero{padding:55px 0 30px}.eyebrow{color:var(--cyan);font-size:11px;letter-spacing:.14em;font-weight:700;text-transform:uppercase}.hero h1{font:900 62px/.9 'Barlow Condensed';text-transform:uppercase;margin:8px 0}.hero h1 span{color:var(--orange)}.hero p{color:var(--muted);font-size:14px;max-width:700px;line-height:1.7}
+.rules{display:grid;gap:14px;margin-top:20px}.rule{background:var(--panel);border:1px solid var(--line);padding:22px 24px}.rule-number{font:900 34px 'Barlow Condensed';color:var(--orange);display:inline-block;width:48px;vertical-align:top}.rule-content{display:inline-block;width:calc(100% - 55px);vertical-align:top}.rule h2{font:800 25px 'Barlow Condensed';margin:0 0 7px;text-transform:uppercase}.rule p{margin:0;color:var(--muted);font-size:13px;line-height:1.65}.important{border-color:rgba(255,107,26,.35)}footer{border-top:1px solid var(--line);margin-top:45px;padding-top:20px;color:var(--muted);display:flex;justify-content:space-between;font-size:11px}footer a{color:var(--muted);text-decoration:none}
+@media(max-width:700px){header{height:auto;min-height:70px;gap:12px;flex-wrap:wrap;padding:12px 0}nav{order:3;width:100%;gap:16px;overflow:auto;padding-bottom:4px}.hero h1{font-size:48px}.rule{padding:18px}.rule-number{width:38px}.rule-content{width:calc(100% - 45px)}footer{display:block;line-height:2}}
+</style>
+</head>
+<body>
+<div class="shell">
+<header>
+  <div class="brand"><i class="mark"></i>BOOYAH ARENA</div>
+  <nav><a href="index.html">Tournaments</a><a href="index.html#leaderboard">Leaderboard</a><a href="index.html#how">How it works</a><a class="active" href="rules.html">Rules</a><a href="admin-login.html">Admin</a><a href="player-login.html">Player Login</a></nav>
+  <a class="back" href="index.html">BACK TO HOME</a>
+</header>
+<section class="hero">
+  <div class="eyebrow">BOOYAH ARENA</div>
+  <h1>TOURNAMENT <span>RULES.</span></h1>
+  <p>Please read the rules before entering a match. Your participation and payment are subject to the rules below.</p>
+</section>
+<section class="rules">
+  <article class="rule"><span class="rule-number">01</span><div class="rule-content"><h2>No rules</h2><p>No additional gameplay rules are imposed by BOOYAH ARENA.</p></div></article>
+  <article class="rule"><span class="rule-number">02</span><div class="rule-content"><h2>Record your gameplay</h2><p>Record your gameplay because hackers may enter the match. If you submit clear proof and the proof is verified by the admin, the admin can remove the offending player.</p></div></article>
+  <article class="rule important"><span class="rule-number">04</span><div class="rule-content"><h2>Participate on time</h2><p>Participate in your match at the scheduled time. If you do not participate on time, your entry amount will not be returned.</p></div></article>
+</section>
+<footer><span>© 2026 BOOYAH ARENA. PLAY FAIR. PLAY FIERCE.</span><span><a href="rules.html">Rules</a> · Support · Privacy</span></footer>
+</div>
+</body>
+</html>

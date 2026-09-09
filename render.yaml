@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: booyah-arena
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /api/health
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: booyah_arena
+      - key: BOOYAH_ADMIN_USER
+        sync: false
+      - key: BOOYAH_ADMIN_PASS
+        sync: false
+      - key: BOOYAH_UPI_ID
+        value: 9940879866@nyes
+      - key: BOOYAH_UPI_NAME
+        value: BOOYAH ARENA
