@@ -54,3 +54,6 @@ After the Render service is created:
 **Important:** the exact DNS records depend on your domain registrar/DNS provider. Do not change nameservers unless you intend to move DNS management.
 
 Production URL: `https://ffgamers.com`
+
+
+Customer Support (WhatsApp): https://chat.whatsapp.com/CsmvEFNvAFI5DjpwfXob0f
