@@ -6,6 +6,9 @@ from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
 from io import BytesIO
 import qrcode
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
+from openpyxl.worksheet.datavalidation import DataValidation
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 # Production configuration is supplied through environment variables (Render/MongoDB Atlas).
@@ -123,7 +126,7 @@ def auth(h, admin=False):
     return session
 
 def player_obj(r):
-    return {'id': str(r['_id']), 'username': r['username'], 'name': r['name'], 'email': r['email'], 'uid': r['uid'], 'points': r.get('points',0), 'blocked': bool(r.get('blocked', False)), 'created': r['created_at']}
+    return {'id': str(r['_id']), 'username': r['username'], 'name': r['name'], 'email': r['email'], 'uid': r['uid'], 'points': r.get('points',0), 'blocked': bool(r.get('blocked', False)), 'created': r['created_at'], 'last_login_at': r.get('last_login_at')}
 
 def init_indexes():
     players.create_index([('username', ASCENDING)], unique=True)
@@ -140,6 +143,87 @@ def init_indexes():
     # Verify the server is reachable at startup.
     client.admin.command('ping')
 
+
+def build_match_workbook(tournament=None, scheduled_at=None, upcoming_only=False):
+    """Create an admin Excel workbook containing joined players for one or all upcoming slots."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Joined Players'
+    headers = [
+        'Match date', 'Match time (IST)', 'Tournament', 'Player name',
+        'Free Fire UID', 'Username', 'Email', 'Squad', 'Entry fee (₹)',
+        'Match status', 'UID verified', 'Name verified', 'Entered match'
+    ]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal='center', vertical='center')
+    ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = 'A1:M1'
+
+    tournaments = ['BR ₹50 Room', 'Lone Wolf ₹50', 'Lone Wolf ₹100']
+    query = {}
+    if tournament and scheduled_at:
+        query = {'tournament': tournament, 'scheduled_at': scheduled_at}
+    elif upcoming_only:
+        # Build a small window from the same live timetable used by admin.
+        now_local = schedule_now()
+        for t in tournaments:
+            interval = 30 if t == 'BR ₹50 Room' else 20
+            minute = (now_local.minute // interval) * interval
+            candidate = datetime.datetime.combine(
+                now_local.date(), datetime.time(now_local.hour, minute), tzinfo=now_local.tzinfo
+            )
+            if candidate <= now_local:
+                candidate += datetime.timedelta(minutes=interval)
+            if candidate.hour < 18:
+                candidate = datetime.datetime.combine(candidate.date(), datetime.time(18, 0), tzinfo=now_local.tzinfo)
+            elif candidate.hour >= 22:
+                candidate = datetime.datetime.combine(candidate.date() + datetime.timedelta(days=1), datetime.time(18, 0), tzinfo=now_local.tzinfo)
+            # Include the next 12 slots per format.
+            for _ in range(12):
+                slot = candidate.isoformat(timespec='seconds')
+                for m in matches.find({'tournament': t, 'scheduled_at': slot}).sort('_id', 1):
+                    p = players.find_one({'_id': m.get('player_id')}) or {}
+                    start = parse_iso(slot)
+                    ws.append([
+                        start.strftime('%d-%m-%Y') if start else '',
+                        start.strftime('%I:%M %p') if start else '',
+                        t, p.get('name',''), p.get('uid',''), p.get('username',''),
+                        p.get('email',''), m.get('squad',''),
+                        int(m.get('entry_fee', 0)), live_match_status(m),
+                        '', '', ''
+                    ])
+                candidate += datetime.timedelta(minutes=interval)
+                if candidate.hour >= 22:
+                    break
+    else:
+        rows = list(matches.find(query).sort('scheduled_at', 1).sort('_id', 1))
+        for m in rows:
+            p = players.find_one({'_id': m.get('player_id')}) or {}
+            start = parse_iso(m.get('scheduled_at'))
+            ws.append([
+                start.astimezone(SCHEDULE_TZ).strftime('%d-%m-%Y') if start else '',
+                start.astimezone(SCHEDULE_TZ).strftime('%I:%M %p') if start else '',
+                m.get('tournament',''), p.get('name',''), p.get('uid',''),
+                p.get('username',''), p.get('email',''), m.get('squad',''),
+                int(m.get('entry_fee', 0)), live_match_status(m), '', '', ''
+            ])
+
+    for col, width in enumerate([14,16,22,22,16,18,28,16,14,16,16,16,16], 1):
+        ws.column_dimensions[chr(64+col)].width = width
+    dv = DataValidation(type='list', formula1='"YES,NO"', allow_blank=True)
+    ws.add_data_validation(dv)
+    dv.add('K2:M1048576')
+
+    info = wb.create_sheet('Instructions')
+    info.append(['BOOYAH ARENA — PLAYER VERIFICATION'])
+    info['A1'].font = Font(bold=True, size=14)
+    info.append(['Use this sheet before the match to compare the registered player name and Free Fire UID with the player who enters the room.'])
+    info.append(['Mark UID verified, Name verified, and Entered match as YES or NO.'])
+    info.column_dimensions['A'].width = 115
+    return wb
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): print('%s - %s' % (self.address_string(), fmt % args))
     def do_OPTIONS(self):
@@ -152,6 +236,40 @@ class H(BaseHTTPRequestHandler):
                 return json_send(self,200,{'ok':True,'database':'connected'})
             except Exception as e:
                 return json_send(self,503,{'ok':False,'database':'unavailable'})
+        if p == '/api/admin/export-match':
+            if not auth(self, True): return json_send(self,401,{'error':'Admin login required'})
+            q = parse_qs(urlparse(self.path).query)
+            tournament = q.get('tournament',[''])[0]
+            scheduled_at = q.get('scheduled_at',[''])[0]
+            if not tournament or not scheduled_at:
+                return json_send(self,400,{'error':'Tournament and scheduled_at are required'})
+            wb = build_match_workbook(tournament, scheduled_at)
+            bio = BytesIO()
+            wb.save(bio)
+            data = bio.getvalue()
+            safe_t = re.sub(r'[^A-Za-z0-9]+','-', tournament).strip('-') or 'match'
+            safe_dt = re.sub(r'[^0-9A-Za-z]+','-', scheduled_at).strip('-')
+            filename = f'BOOYAH-ARENA-{safe_t}-{safe_dt}.xlsx'
+            self.send_response(200)
+            self.send_header('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if p == '/api/admin/export-upcoming':
+            if not auth(self, True): return json_send(self,401,{'error':'Admin login required'})
+            wb = build_match_workbook(upcoming_only=True)
+            bio = BytesIO()
+            wb.save(bio)
+            data = bio.getvalue()
+            self.send_response(200)
+            self.send_header('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            self.send_header('Content-Disposition','attachment; filename="BOOYAH-ARENA-upcoming-player-verification.xlsx"')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if p.startswith('/api/'): return self.api_get(p)
         if p == '/': p = '/index.html'
         fp = os.path.join(BASE, p.lstrip('/'))
@@ -261,7 +379,10 @@ class H(BaseHTTPRequestHandler):
             return json_send(self,200,{'rooms':rows})
         if p == '/api/admin/data':
             if not auth(self,True): return json_send(self,401,{'error':'Admin login required'})
-            ps = list(players.find({}, {'username':1,'name':1,'email':1,'uid':1,'points':1,'blocked':1,'created_at':1}).sort('_id',-1))
+            ps = list(players.find({}, {'username':1,'name':1,'email':1,'uid':1,'points':1,'blocked':1,'created_at':1,'last_login_at':1}).sort('_id',-1))
+            active_player_ids={sess.get('player_id') for sess in SESSIONS.values() if not sess.get('admin') and sess.get('player_id')}
+            for pp in ps:
+                pp['logged_in']=str(pp['_id']) in active_player_ids
             dep = list(deposits.find({}).sort('_id',-1)); wd = list(withdrawals.find({}).sort('_id',-1)); mt = list(matches.find({}).sort('_id',-1))
             pmap = {str(x['_id']): x for x in players.find({})}
             for arr in (dep,wd,mt):
@@ -373,7 +494,8 @@ class H(BaseHTTPRequestHandler):
                 r = players.find_one({'$or':[{'username':ident_value},{'email':ident_value}], 'password_hash':ph(password)})
                 if not r: return json_send(self,401,{'error':'Invalid username/email or password'})
                 if r.get('blocked', False): return json_send(self,403,{'error':'Your player account is blocked. Please contact the administrator.'})
-                tok=secrets.token_urlsafe(32); SESSIONS[tok]={'player_id':str(r['_id']),'admin':False}; return json_send(self,200,{'token':tok,'player':player_obj(r)})
+                login_time=now(); players.update_one({'_id':r['_id']},{'$set':{'last_login_at':login_time}}); r['last_login_at']=login_time
+                tok=secrets.token_urlsafe(32); SESSIONS[tok]={'player_id':str(r['_id']),'admin':False,'login_at':login_time}; return json_send(self,200,{'token':tok,'player':player_obj(r)})
             if p == '/api/admin/login':
                 if d.get('username') != ADMIN_USER or d.get('password') != ADMIN_PASS: return json_send(self,401,{'error':'Invalid admin credentials'})
                 tok=secrets.token_urlsafe(32); SESSIONS[tok]={'admin':True}; return json_send(self,200,{'token':tok})

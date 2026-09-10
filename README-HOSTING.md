@@ -57,3 +57,10 @@ Production URL: `https://ffgamers.com`
 
 
 Customer Support (WhatsApp): https://chat.whatsapp.com/CsmvEFNvAFI5DjpwfXob0f
+
+
+## Player verification Excel
+The Admin page now includes:
+- **Export selected Excel** for the currently selected match slot.
+- **Export upcoming Excel** for the next upcoming slots that have joined players.
+The workbook lists player name, Free Fire UID, username, email, squad, entry fee and match status, with blank YES/NO columns for **UID verified**, **Name verified**, and **Entered match**.
