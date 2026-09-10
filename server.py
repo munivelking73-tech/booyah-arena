@@ -26,12 +26,20 @@ rooms = db.rooms
 admin_actions = db.admin_actions
 SESSIONS = {}
 
+# Tournament schedule timezone: India Standard Time (IST, UTC+05:30).
+# Render servers normally run in UTC, so never use the server's local timezone
+# for match-slot generation.
+SCHEDULE_TZ = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+def schedule_now():
+    return datetime.datetime.now(SCHEDULE_TZ)
+
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
 def next_match_time(tournament):
     # Match slots use the computer's local timezone, matching the player UI.
-    local = datetime.datetime.now().astimezone()
+    local = schedule_now()
     day = local.date()
     # BR ₹50 starts every 30 minutes. Both Lone Wolf tiers start every 20 minutes.
     interval = 30 if tournament == 'BR ₹50 Room' else 20
@@ -188,7 +196,7 @@ class H(BaseHTTPRequestHandler):
         if p == '/api/available-matches':
             if not s: return json_send(self,401,{'error':'Login required'})
             tournaments=['BR ₹50 Room','Lone Wolf ₹50','Lone Wolf ₹100']
-            now_local=datetime.datetime.now().astimezone()
+            now_local=schedule_now()
             out=[]
             for t in tournaments:
                 interval=30 if t=='BR ₹50 Room' else 20
@@ -266,7 +274,7 @@ class H(BaseHTTPRequestHandler):
             # before anyone joins, then publish a room for the exact slot. Existing player records are
             # merged into those generated slots so missed/late registrations remain visible.
             tournaments=['BR ₹50 Room','Lone Wolf ₹50','Lone Wolf ₹100']
-            now_local=datetime.datetime.now().astimezone()
+            now_local=schedule_now()
             now_utc=datetime.datetime.now(datetime.timezone.utc)
             grouped={}
 
@@ -294,12 +302,25 @@ class H(BaseHTTPRequestHandler):
                     if candidate.hour >= 22:
                         break
 
-            # Merge every actual player match, including older slots, into the timetable.
+            # Merge current/new-format player matches into slot control.
+            # Historical records remain available in Match database / results, but
+            # obsolete pre-6PM/old-timezone slots must not reappear in the live timetable.
             for x in mt:
-                key=(x.get('tournament'),x.get('scheduled_at'))
-                if not x.get('tournament') or not x.get('scheduled_at'):
+                t=x.get('tournament')
+                scheduled=x.get('scheduled_at')
+                if t not in tournaments or not scheduled:
                     continue
-                g=add_group(x.get('tournament'),x.get('scheduled_at'))
+                start=parse_iso(scheduled)
+                if not start:
+                    continue
+                start_ist=start.astimezone(SCHEDULE_TZ) if start.tzinfo else start.replace(tzinfo=SCHEDULE_TZ)
+                # Keep only valid 6:00 PM-9:40 PM IST slots from today onward.
+                if start_ist.time() < datetime.time(18,0) or start_ist.time() >= datetime.time(22,0):
+                    continue
+                if start_ist.date() < now_local.date():
+                    continue
+                key=(t,scheduled)
+                g=add_group(t,scheduled)
                 g['players'].append({'id':str(x.get('_id')),'name':x.get('name'),'uid':x.get('uid'),'squad':x.get('squad'),'status':live_match_status(x)})
 
             room_docs=list(rooms.find({}, {'_id':0,'tournament':1,'scheduled_at':1,'room_id':1,'password':1,'updated_at':1}))
@@ -458,7 +479,6 @@ class H(BaseHTTPRequestHandler):
                 current=parse_iso(m.get('scheduled_at'))
                 if not current:return json_send(self,400,{'error':'Match has no valid scheduled time'})
                 candidate=current + datetime.timedelta(minutes=interval)
-                now_local=datetime.datetime.now().astimezone()
                 # Preserve the match slot timezone and operating window while looking for the next non-full slot.
                 while True:
                     if candidate.hour < 18:

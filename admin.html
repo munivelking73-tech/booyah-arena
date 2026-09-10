@@ -4,7 +4,7 @@ let ADMIN_DATA=null, SLOT_MAP={};
 async function api(p,o={}){o.headers={...(o.headers||{}),'Content-Type':'application/json',Authorization:'Bearer '+token()};let r=await fetch(p,o),d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');return d}
 function esc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 function b(s){return `<span class="badge ${s==='Pending'?'pending':s==='Rejected'?'reject':s==='Live'?'done':'done'}">${esc(s)}</span>`}
-function fmt(v){return v?new Date(v).toLocaleString('en-IN',{dateStyle:'medium',timeStyle:'short'}):'Not scheduled'}
+function fmt(v){return v?new Date(v).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',dateStyle:'medium',timeStyle:'short'}):'Not scheduled'}
 function slotKey(g){return (g.tournament||'')+'|'+(g.scheduled_at||'')}
 function renderSlots(groups){
   SLOT_MAP={}; const sel=document.getElementById('slotSelect'); const previous=sel.value;
