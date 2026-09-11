@@ -10,6 +10,14 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 from openpyxl.worksheet.datavalidation import DataValidation
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+except ImportError:
+    firebase_admin = None
+    credentials = None
+    messaging = None
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 # Production configuration is supplied through environment variables (Render/MongoDB Atlas).
 MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://127.0.0.1:27017/')
@@ -18,6 +26,20 @@ ADMIN_USER = os.environ.get('BOOYAH_ADMIN_USER', 'Munivel@9866')
 ADMIN_PASS = os.environ.get('BOOYAH_ADMIN_PASS', 'MuNiVel@1143')
 UPI_ID = os.environ.get('BOOYAH_UPI_ID', '9940879866@nyes')
 UPI_NAME = os.environ.get('BOOYAH_UPI_NAME', 'BOOYAH ARENA')
+
+# Firebase / FCM configuration.
+# The web values are public Firebase client configuration; the service-account JSON is secret.
+FIREBASE_WEB_API_KEY = os.environ.get('FIREBASE_WEB_API_KEY', '')
+FIREBASE_WEB_AUTH_DOMAIN = os.environ.get('FIREBASE_WEB_AUTH_DOMAIN', '')
+FIREBASE_WEB_PROJECT_ID = os.environ.get('FIREBASE_WEB_PROJECT_ID', '')
+FIREBASE_WEB_STORAGE_BUCKET = os.environ.get('FIREBASE_WEB_STORAGE_BUCKET', '')
+FIREBASE_WEB_MESSAGING_SENDER_ID = os.environ.get('FIREBASE_WEB_MESSAGING_SENDER_ID', '')
+FIREBASE_WEB_APP_ID = os.environ.get('FIREBASE_WEB_APP_ID', '')
+FIREBASE_WEB_VAPID_KEY = os.environ.get('FIREBASE_WEB_VAPID_KEY', '')
+FIREBASE_SERVICE_ACCOUNT_JSON = os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON', '')
+FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', FIREBASE_WEB_PROJECT_ID)
+
+FIREBASE_APP = None
 
 client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
 db = client[DB_NAME]
@@ -41,6 +63,93 @@ def schedule_now():
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+def firebase_web_config():
+    return {
+        'enabled': bool(FIREBASE_WEB_API_KEY and FIREBASE_WEB_PROJECT_ID and FIREBASE_WEB_MESSAGING_SENDER_ID and FIREBASE_WEB_APP_ID and FIREBASE_WEB_VAPID_KEY),
+        'apiKey': FIREBASE_WEB_API_KEY,
+        'authDomain': FIREBASE_WEB_AUTH_DOMAIN,
+        'projectId': FIREBASE_WEB_PROJECT_ID,
+        'storageBucket': FIREBASE_WEB_STORAGE_BUCKET,
+        'messagingSenderId': FIREBASE_WEB_MESSAGING_SENDER_ID,
+        'appId': FIREBASE_WEB_APP_ID,
+        'vapidKey': FIREBASE_WEB_VAPID_KEY,
+    }
+
+def firebase_admin_app():
+    global FIREBASE_APP
+    if FIREBASE_APP is not None:
+        return FIREBASE_APP
+    if not firebase_admin or not FIREBASE_SERVICE_ACCOUNT_JSON:
+        return None
+    try:
+        info = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
+        options = {'projectId': FIREBASE_PROJECT_ID} if FIREBASE_PROJECT_ID else {}
+        FIREBASE_APP = firebase_admin.initialize_app(credentials.Certificate(info), options=options)
+        return FIREBASE_APP
+    except Exception as exc:
+        print('FCM initialization failed:', repr(exc))
+        return None
+
+def send_room_notification(tournament, scheduled_at, room_id, password):
+    """Send room credentials only to players registered for this exact match slot."""
+    if not firebase_admin_app() or not messaging:
+        return {'enabled': False, 'sent': 0, 'failed': 0, 'reason': 'Firebase Admin SDK is not configured'}
+    joined = list(matches.find({'tournament': tournament, 'scheduled_at': scheduled_at}, {'player_id': 1}))
+    player_ids = list({x.get('player_id') for x in joined if x.get('player_id')})
+    tokens = []
+    token_players = {}
+    for pid in player_ids:
+        p = players.find_one({'_id': pid}, {'fcm_tokens': 1})
+        for item in (p or {}).get('fcm_tokens', []):
+            token = item.get('token') if isinstance(item, dict) else str(item)
+            if token and token not in token_players:
+                tokens.append(token)
+                token_players[token] = pid
+    if not tokens:
+        return {'enabled': True, 'sent': 0, 'failed': 0, 'reason': 'No registered notification devices for joined players'}
+
+    start = parse_iso(scheduled_at)
+    display_time = start.astimezone(SCHEDULE_TZ).strftime('%d %b, %I:%M %p') if start else scheduled_at
+    title = f'{tournament} — Room Published'
+    body = f'Room ID & password are ready for your {display_time} match.'
+    url = 'https://booyah-arena-yxvl.onrender.com/player-dashboard.html'
+    sent = failed = 0
+    bad_tokens = []
+    for i in range(0, len(tokens), 500):
+        batch = tokens[i:i+500]
+        message = messaging.MulticastMessage(
+            notification=messaging.Notification(title=title, body=body),
+            data={
+                'type': 'room_published',
+                'tournament': tournament,
+                'scheduled_at': scheduled_at,
+                'room_id': room_id,
+                'password': password,
+                'url': url,
+            },
+            tokens=batch,
+            android=messaging.AndroidConfig(priority='high', notification=messaging.AndroidNotification(click_action='com.booyaharena.app.OPEN_MATCH')),
+            webpush=messaging.WebpushConfig(
+                headers={'Urgency': 'high'},
+                fcm_options=messaging.WebpushFCMOptions(link=url)
+            )
+        )
+        try:
+            response = messaging.send_each_for_multicast(message)
+            sent += response.success_count
+            failed += response.failure_count
+            for idx, resp in enumerate(response.responses):
+                if not resp.success:
+                    err = str(resp.exception).lower()
+                    if 'registration-token-not-registered' in err or 'unregistered' in err or 'invalid-argument' in err:
+                        bad_tokens.append(batch[idx])
+        except Exception as exc:
+            print('FCM send failed:', repr(exc))
+            failed += len(batch)
+    for token in bad_tokens:
+        players.update_many({'fcm_tokens.token': token}, {'$pull': {'fcm_tokens': {'token': token}}})
+    return {'enabled': True, 'sent': sent, 'failed': failed}
 
 def tournament_defaults():
     return {
@@ -243,6 +352,8 @@ class H(BaseHTTPRequestHandler):
         self.send_response(204); self.send_header('Access-Control-Allow-Origin','*'); self.send_header('Access-Control-Allow-Headers','Content-Type, Authorization'); self.send_header('Access-Control-Allow-Methods','GET, POST, OPTIONS'); self.end_headers()
     def do_GET(self):
         p = urlparse(self.path).path
+        if p == '/api/firebase-config':
+            return json_send(self,200,firebase_web_config())
         if p == '/api/health':
             try:
                 client.admin.command('ping')
@@ -511,6 +622,20 @@ class H(BaseHTTPRequestHandler):
                 token=self.headers.get('Authorization','').replace('Bearer ','').strip(); SESSIONS.pop(token,None); return json_send(self,200,{'ok':True})
 
             s=auth(self)
+            if p == '/api/notifications/register-token' and s:
+                token=str(d.get('token','')).strip()
+                platform=str(d.get('platform','web')).strip().lower()[:20]
+                if not token or len(token) > 4096:
+                    return json_send(self,400,{'error':'A valid FCM token is required'})
+                pid=ObjectId(s['player_id'])
+                players.update_one({'_id':pid},{'$pull':{'fcm_tokens':{'token':token}}})
+                players.update_one({'_id':pid},{'$push':{'fcm_tokens':{'$each':[{'token':token,'platform':platform,'updated_at':now()}],'$slice':-10}}})
+                return json_send(self,200,{'ok':True})
+            if p == '/api/notifications/unregister-token' and s:
+                token=str(d.get('token','')).strip()
+                if token:
+                    players.update_one({'_id':ObjectId(s['player_id'])},{'$pull':{'fcm_tokens':{'token':token}}})
+                return json_send(self,200,{'ok':True})
             if p == '/api/deposit' and s:
                 amt=int(d.get('amount',0)); ref=d.get('reference','').strip()
                 if amt<10 or not ref: return json_send(self,400,{'error':'Deposit amount must be at least ₹10 and transaction ID is required'})
@@ -646,7 +771,9 @@ class H(BaseHTTPRequestHandler):
                     datetime.datetime.fromisoformat(scheduled_at.replace('Z','+00:00'))
                 except Exception:
                     return json_send(self,400,{'error':'Invalid match date/time'})
-                rooms.update_one({'tournament':t,'scheduled_at':scheduled_at},{'$set':{'room_id':rid,'password':pw,'updated_at':now()}},upsert=True); return json_send(self,200,{'ok':True})
+                rooms.update_one({'tournament':t,'scheduled_at':scheduled_at},{'$set':{'room_id':rid,'password':pw,'updated_at':now()}},upsert=True)
+                notification=send_room_notification(t,scheduled_at,rid,pw)
+                return json_send(self,200,{'ok':True,'notification':notification})
             return json_send(self,404,{'error':'Not found'})
         except Exception as e:
             print('API ERROR:',repr(e)); return json_send(self,500,{'error':str(e)})
