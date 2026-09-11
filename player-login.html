@@ -2,7 +2,7 @@
 let m='login'; let submitting=false;
 function togglePassword(){const p=document.getElementById('password'),b=document.getElementById('togglePass');p.type=p.type==='password'?'text':'password';b.textContent=p.type==='password'?'SHOW':'HIDE'}
 function mode(x){m=x;document.getElementById('lt').classList.toggle('active',x==='login');document.getElementById('rt').classList.toggle('active',x==='register');document.getElementById('reg').style.display=x==='register'?'block':'none';document.getElementById('cl').style.display=x==='register'?'block':'none';document.getElementById('refLabel').style.display=x==='register'?'block':'none';document.getElementById('sub').textContent=x==='login'?'LOGIN':'CREATE ACCOUNT';document.getElementById('err').textContent=''}
-document.getElementById('loginForm').addEventListener('submit', submitForm);
+document.getElementById('loginForm').addEventListener('submit', submitForm); if(new URLSearchParams(location.search).get('mode')==='register') mode('register');
 async function submitForm(e){
  e.preventDefault();
  if(submitting)return;

@@ -13,7 +13,7 @@
     * { box-sizing:border-box; } body { margin:0; color:var(--ink); background:var(--bg); font-family:'DM Sans',sans-serif; }
     body::before { content:''; position:fixed; inset:0; pointer-events:none; background:radial-gradient(circle at 80% 5%,rgba(255,73,24,.17),transparent 25%),radial-gradient(circle at 15% 28%,rgba(41,214,255,.1),transparent 23%),linear-gradient(115deg,transparent 0 49%,rgba(255,255,255,.015) 49% 51%,transparent 51%); }
     .shell { max-width:1440px; margin:auto; padding:0 5vw 50px; position:relative; }
-    header { height:82px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }
+    header { height:82px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); } .site-header-centered{justify-content:center;}
     .brand { display:flex; gap:12px; align-items:center; font-family:'Barlow Condensed',sans-serif; font-weight:900; letter-spacing:.04em; font-size:27px; } .mark { width:33px; height:33px; background:var(--orange); clip-path:polygon(50% 0,100% 22%,82% 100%,21% 82%,0 30%); transform:rotate(8deg); }
     nav { display:flex; gap:28px; } nav a { color:var(--muted); text-decoration:none; font-size:14px; font-weight:600; } nav a.active,nav a:hover { color:white; }
     .login,.join { border:0; color:white; font:700 13px 'DM Sans'; cursor:pointer; } .login { background:transparent; margin-right:16px; } .join { background:var(--orange); padding:12px 19px; box-shadow:4px 4px 0 #9f3200; }
@@ -31,11 +31,28 @@
     @media (max-width:1050px) { .tournaments{grid-template-columns:repeat(2,1fr)} }
     @media (max-width:800px) { nav { display:none; }.hero,.lower { grid-template-columns:1fr; }.tournaments { grid-template-columns:1fr; }.hero { padding-top:40px; }.prize-card { max-width:440px; } }
     @media (max-width:480px) { header { height:66px; }.brand { font-size:22px; }.login { display:none; }.join { padding:10px 12px; } .shell { padding:0 20px 35px; } h1 { font-size:59px; }.section-head { margin-top:34px; } footer { display:block; line-height:2; } }
+  
+    .more-menu-btn{position:fixed;left:18px;top:18px;z-index:1001;background:#121621;color:#fff;border:1px solid var(--line);padding:10px 14px;font:700 12px 'DM Sans';cursor:pointer;box-shadow:0 4px 18px rgba(0,0,0,.28)}.more-menu-btn:hover{border-color:rgba(255,107,26,.65);color:var(--orange)}.more-menu{position:fixed;left:0;top:0;bottom:0;width:290px;z-index:1003;background:#0c1018;border-right:1px solid var(--line);padding:22px 18px;transform:translateX(-105%);transition:transform .25s ease;box-shadow:12px 0 35px rgba(0,0,0,.4)}.more-menu.open{transform:translateX(0)}.more-menu-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:1002;opacity:0;visibility:hidden;transition:.2s}.more-menu-backdrop.open{opacity:1;visibility:visible}.more-menu-head{display:flex;align-items:center;justify-content:space-between;padding-bottom:18px;border-bottom:1px solid var(--line);margin-bottom:12px}.more-menu .brand{font-size:22px}.more-menu .mark{width:24px;height:24px}.more-close{background:transparent;color:#fff;border:0;font-size:28px;cursor:pointer}.more-menu a{display:flex;gap:12px;align-items:center;color:var(--muted);text-decoration:none;padding:12px 10px;margin:3px 0;font-size:13px;font-weight:600;border:1px solid transparent}.more-menu a:hover{color:#fff;background:#151b27;border-color:var(--line)}.more-menu a.more-primary{background:var(--orange);color:#fff}.more-menu a.more-primary:hover{background:#ff7b32}.more-menu a:first-of-type{margin-top:8px}@media(max-width:480px){.more-menu-btn{left:12px;top:12px}.more-menu{width:min(290px,86vw)}.more-menu-btn span{display:none}}
   </style>
 </head>
 <body>
+  <button class="more-menu-btn" type="button" aria-label="Open menu" aria-expanded="false" onclick="toggleMoreMenu()">☰ <span>More</span></button>
+  <div class="more-menu-backdrop" id="moreMenuBackdrop" onclick="closeMoreMenu()"></div>
+  <aside class="more-menu" id="moreMenu" aria-label="Main menu">
+    <div class="more-menu-head"><div class="brand"><i class="mark"></i>BOOYAH ARENA</div><button type="button" class="more-close" onclick="closeMoreMenu()" aria-label="Close menu">×</button></div>
+    <a href="index.html">⌂ <span>Home</span></a>
+    <a href="#tournaments">▦ <span>Tournaments</span></a>
+    <a href="#leaderboard">★ <span>Leaderboard</span></a>
+    <a href="#how">? <span>How it works</span></a>
+    <a href="rules.html">≡ <span>Rules</span></a>
+    <a href="player-login.html">↪ <span>Player Login</span></a>
+    <a href="admin-login.html">⚙ <span>Admin Login</span></a>
+    <a class="more-primary" href="player-login.html?mode=register">＋ <span>Create Account</span></a>
+    <a href="player-dashboard.html">◉ <span>Player Dashboard</span></a>
+    <a href="https://chat.whatsapp.com/CsmvEFNvAFI5DjpwfXob0f" target="_blank" rel="noopener">◌ <span>Customer Support</span></a>
+  </aside>
   <main class="shell">
-    <header><div class="brand"><i class="mark"></i>BOOYAH ARENA</div><nav><a class="active" href="#tournaments">Tournaments</a><a href="#leaderboard">Leaderboard</a><a href="#how">How it works</a><a href="rules.html">Rules</a><a href="admin-login.html">Admin</a><a href="player-login.html">Player Login</a><a href="https://chat.whatsapp.com/CsmvEFNvAFI5DjpwfXob0f" target="_blank" rel="noopener">Customer Support</a></nav><div><a class="login" id="accountButton" href="player-dashboard.html" style="text-decoration:none">Player Login</a><a class="join" href="player-login.html" style="text-decoration:none">Create account</a></div></header>
+    <header class="site-header-centered"><div class="brand"><i class="mark"></i>BOOYAH ARENA</div></header>
     <section class="hero"><div><div class="eyebrow">India's competitive Free Fire hub</div><h1>DROP IN.<br><span>DOMINATE.</span><br>TAKE THE BOOYAH.</h1><p>Every day from 6:00 PM to 10:00 PM, the ₹25 BR starts at 6:00 PM every 30 minutes. ₹50 BR starts at 6:10 PM every 30 minutes. ₹25 Lone Wolf starts at 6:20 PM every 25 minutes. ₹50 Lone Wolf starts at 6:25 PM every 25 minutes.</p><div class="hero-actions"><button class="join large" onclick="openModal('BR ₹50 Room')">Join next room</button><button class="ghost" onclick="document.querySelector('#how').scrollIntoView({behavior:'smooth'})">How it works</button></div></div><aside class="prize-card"><div class="small">Daily match timetable</div><h2 style="font-size:34px;margin-top:8px">BR ₹50 Starts<br>Every 30 Minutes</h2><div class="prize">₹50 <b>BR · 6 PM–10 PM</b></div><div class="small">Next room starts in</div><div class="countdown"><div class="time" id="hours">00<em>Hours</em></div><div class="time" id="mins">30<em>Minutes</em></div><div class="time" id="secs">00<em>Seconds</em></div></div></aside></section>
     <section id="tournaments"><div class="section-head"><h2>Upcoming<br>Matches</h2><a>Live schedule →</a></div><div class="tournaments">
       <article class="t-card"><img class="match-banner" src="br-25-banner.png" alt="BR ₹25 match banner"><span class="tag live">● BR · Every 30 min</span><h3>BR ₹25 Room</h3><div class="meta"><span class="next-slot" data-tournament="BR ₹25 Room">Next room loading…</span></div><div class="price-line"><span><strong>1st ₹500</strong></span><span><strong>2nd ₹200</strong></span><span>₹5/kill</span><span>Entry ₹25</span></div><div class="bar"><span style="width:0%"></span></div><div class="slots"><span class="public-slots" data-match="BR ₹25 Room">0/48 players registered</span><span>6:00 PM–10:00 PM</span></div><div class="room-details" data-room="BR ₹25 Room">🔒 Room ID & password unlock 5 minutes before match.</div><button onclick="openModal('BR ₹25 Room')">Enter for ₹25</button></article>
@@ -64,6 +81,12 @@ async function startCheckout(){if(!squadName.value.trim()||!/^[0-9]{10}$/.test(p
 async function openTopup(){if(!token()){goPlayerLogin();return}location='player-dashboard.html#deposit'}
 window.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 (async()=>{if(token())try{const m=await api('/api/me');accountButton.textContent='Player: '+m.player.name.split(' ')[0]}catch(e){localStorage.removeItem('booyahToken')}await tick();setInterval(tick,1000)})();
+</script>
+
+<script>
+function toggleMoreMenu(){const m=document.getElementById('moreMenu'),b=document.getElementById('moreMenuBackdrop'),btn=document.querySelector('.more-menu-btn');const open=!m.classList.contains('open');m.classList.toggle('open',open);b.classList.toggle('open',open);btn.setAttribute('aria-expanded',open?'true':'false');}
+function closeMoreMenu(){const m=document.getElementById('moreMenu'),b=document.getElementById('moreMenuBackdrop'),btn=document.querySelector('.more-menu-btn');m.classList.remove('open');b.classList.remove('open');btn.setAttribute('aria-expanded','false');}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMoreMenu()});
 </script>
 </body>
 </html>
