@@ -64,3 +64,13 @@ The Admin page now includes:
 - **Export selected Excel** for the currently selected match slot.
 - **Export upcoming Excel** for the next upcoming slots that have joined players.
 The workbook lists player name, Free Fire UID, username, email, squad, entry fee and match status, with blank YES/NO columns for **UID verified**, **Name verified**, and **Entered match**.
+
+
+## Latest tournament configuration
+- BR ₹25: starts 6:00 PM, every 30 minutes; 1st ₹500, 2nd ₹200, ₹5/kill.
+- BR ₹50: starts 6:10 PM, every 30 minutes; 1st ₹800, 2nd ₹300, ₹10/kill.
+- Lone Wolf ₹25: starts 6:20 PM, every 25 minutes; 1st ₹45.
+- Lone Wolf ₹50: starts 6:25 PM, every 25 minutes; 1st ₹80.
+- Lone Wolf ₹100 removed from the active timetable.
+- Admin can edit entry/prize/per-kill values for future joins from Active match formats.
+- Referral codes award 10 points automatically per successful new referral.

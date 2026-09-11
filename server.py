@@ -26,6 +26,8 @@ deposits = db.deposits
 matches = db.matches
 withdrawals = db.withdrawals
 rooms = db.rooms
+referrals = db.referrals
+tournament_configs = db.tournament_configs
 admin_actions = db.admin_actions
 SESSIONS = {}
 
@@ -40,33 +42,61 @@ def schedule_now():
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
-def next_match_time(tournament):
-    # Match slots use the computer's local timezone, matching the player UI.
-    local = schedule_now()
-    day = local.date()
-    # BR ₹50 starts every 30 minutes. Both Lone Wolf tiers start every 20 minutes.
-    interval = 30 if tournament == 'BR ₹50 Room' else 20
-    if tournament not in ('BR ₹50 Room', 'Lone Wolf ₹50', 'Lone Wolf ₹100'):
-        raise ValueError('Unknown tournament')
-    minute = (local.minute // interval) * interval
-    candidate = datetime.datetime.combine(day, datetime.time(local.hour, minute), tzinfo=local.tzinfo)
-    if candidate <= local:
-        candidate += datetime.timedelta(minutes=interval)
-    # Daily operating window: 6:00 PM through the final slot before 10:00 PM.
-    if candidate.hour < 18:
-        candidate = datetime.datetime.combine(day, datetime.time(18, 0), tzinfo=local.tzinfo)
-    elif candidate.hour >= 22:
-        candidate = datetime.datetime.combine(day + datetime.timedelta(days=1), datetime.time(18, 0), tzinfo=local.tzinfo)
+def tournament_defaults():
+    return {
+        'BR ₹25 Room': {'entry_fee':25,'first_prize':500,'second_prize':200,'per_kill':5,'capacity':48,'interval':30,'start_minute':0,'banner':'br-25-banner.png'},
+        'BR ₹50 Room': {'entry_fee':50,'first_prize':800,'second_prize':300,'per_kill':10,'capacity':48,'interval':30,'start_minute':10,'banner':'br-50-banner.png'},
+        'Lone Wolf ₹25': {'entry_fee':25,'first_prize':45,'second_prize':0,'per_kill':0,'capacity':2,'interval':25,'start_minute':20,'banner':'lone-wolf-banner.png'},
+        'Lone Wolf ₹50': {'entry_fee':50,'first_prize':80,'second_prize':0,'per_kill':0,'capacity':2,'interval':25,'start_minute':25,'banner':'lone-wolf-banner.png'}
+    }
+
+def get_configs():
+    defaults=tournament_defaults()
+    out={}
+    for t,cfg in defaults.items():
+        saved=tournament_configs.find_one({'tournament':t},{'_id':0}) or {}
+        merged=dict(cfg); merged.update({k:v for k,v in saved.items() if k!='tournament'})
+        out[t]=merged
+    return out
+
+def config_for(tournament):
+    cfg=get_configs().get(tournament)
+    if not cfg: raise ValueError('Unknown tournament')
+    return cfg
+
+def next_match_time(tournament, from_dt=None):
+    cfg=config_for(tournament); local=from_dt.astimezone(SCHEDULE_TZ) if from_dt else schedule_now(); day=local.date()
+    base=datetime.datetime.combine(day,datetime.time(18,0),tzinfo=SCHEDULE_TZ)+datetime.timedelta(minutes=cfg['start_minute'])
+    if local < base: return base.isoformat(timespec='seconds')
+    elapsed=(local-base).total_seconds(); steps=int(elapsed//(cfg['interval']*60))+1
+    candidate=base+datetime.timedelta(minutes=steps*cfg['interval'])
+    if candidate >= datetime.datetime.combine(day,datetime.time(22,0),tzinfo=SCHEDULE_TZ):
+        next_day=day+datetime.timedelta(days=1)
+        candidate=datetime.datetime.combine(next_day,datetime.time(18,0),tzinfo=SCHEDULE_TZ)+datetime.timedelta(minutes=cfg['start_minute'])
     return candidate.isoformat(timespec='seconds')
+
+def match_capacity(tournament):
+    return config_for(tournament)['capacity']
+
+def match_duration(tournament):
+    return config_for(tournament)['interval']
+
+def upcoming_slots(tournament, count=12, from_dt=None):
+    cfg=config_for(tournament); first=parse_iso(next_match_time(tournament, from_dt)); out=[]
+    if not first: return out
+    for i in range(count):
+        slot=first+datetime.timedelta(minutes=cfg['interval']*i)
+        # Stop at the daily 10 PM boundary; next day slots are generated only if explicitly needed.
+        if slot.astimezone(SCHEDULE_TZ).date()!=first.astimezone(SCHEDULE_TZ).date(): break
+        if slot.astimezone(SCHEDULE_TZ).time() >= datetime.time(22,0): break
+        out.append(slot.isoformat(timespec='seconds'))
+    return out
 
 def parse_iso(value):
     try:
         return datetime.datetime.fromisoformat(str(value).replace('Z','+00:00'))
     except Exception:
         return None
-
-def match_capacity(tournament):
-    return {'BR ₹50 Room':48,'Lone Wolf ₹50':2,'Lone Wolf ₹100':2}.get(tournament,48)
 
 def live_match_status(row):
     status=row.get('status','Upcoming')
@@ -77,7 +107,7 @@ def live_match_status(row):
         return status
     now_dt=datetime.datetime.now(datetime.timezone.utc)
     start_utc=start.astimezone(datetime.timezone.utc) if start.tzinfo else start.replace(tzinfo=datetime.timezone.utc)
-    duration = 30 if row.get('tournament') == 'BR ₹50 Room' else 20
+    duration = match_duration(row.get('tournament'))
     if start_utc <= now_dt < start_utc + datetime.timedelta(minutes=duration):
         return 'Live'
     if now_dt >= start_utc + datetime.timedelta(minutes=duration):
@@ -126,7 +156,7 @@ def auth(h, admin=False):
     return session
 
 def player_obj(r):
-    return {'id': str(r['_id']), 'username': r['username'], 'name': r['name'], 'email': r['email'], 'uid': r['uid'], 'points': r.get('points',0), 'blocked': bool(r.get('blocked', False)), 'created': r['created_at'], 'last_login_at': r.get('last_login_at')}
+    return {'id': str(r['_id']), 'username': r['username'], 'name': r['name'], 'email': r['email'], 'uid': r['uid'], 'points': r.get('points',0), 'blocked': bool(r.get('blocked', False)), 'created': r['created_at'], 'last_login_at': r.get('last_login_at'), 'referral_code': r.get('referral_code',''), 'referral_points': r.get('referral_points',0)}
 
 def init_indexes():
     players.create_index([('username', ASCENDING)], unique=True)
@@ -135,6 +165,9 @@ def init_indexes():
     deposits.create_index([('player_id', ASCENDING)])
     matches.create_index([('player_id', ASCENDING)])
     withdrawals.create_index([('player_id', ASCENDING)])
+    referrals.create_index([('referrer_id', ASCENDING)])
+    referrals.create_index([('referred_id', ASCENDING)], unique=True)
+    tournament_configs.create_index([('tournament', ASCENDING)], unique=True)
     try:
         rooms.drop_index('tournament_1')
     except Exception:
@@ -161,42 +194,22 @@ def build_match_workbook(tournament=None, scheduled_at=None, upcoming_only=False
     ws.freeze_panes = 'A2'
     ws.auto_filter.ref = 'A1:M1'
 
-    tournaments = ['BR ₹50 Room', 'Lone Wolf ₹50', 'Lone Wolf ₹100']
+    tournaments = list(tournament_defaults().keys())
     query = {}
     if tournament and scheduled_at:
         query = {'tournament': tournament, 'scheduled_at': scheduled_at}
     elif upcoming_only:
-        # Build a small window from the same live timetable used by admin.
-        now_local = schedule_now()
         for t in tournaments:
-            interval = 30 if t == 'BR ₹50 Room' else 20
-            minute = (now_local.minute // interval) * interval
-            candidate = datetime.datetime.combine(
-                now_local.date(), datetime.time(now_local.hour, minute), tzinfo=now_local.tzinfo
-            )
-            if candidate <= now_local:
-                candidate += datetime.timedelta(minutes=interval)
-            if candidate.hour < 18:
-                candidate = datetime.datetime.combine(candidate.date(), datetime.time(18, 0), tzinfo=now_local.tzinfo)
-            elif candidate.hour >= 22:
-                candidate = datetime.datetime.combine(candidate.date() + datetime.timedelta(days=1), datetime.time(18, 0), tzinfo=now_local.tzinfo)
-            # Include the next 12 slots per format.
-            for _ in range(12):
-                slot = candidate.isoformat(timespec='seconds')
+            for slot in upcoming_slots(t,12):
                 for m in matches.find({'tournament': t, 'scheduled_at': slot}).sort('_id', 1):
                     p = players.find_one({'_id': m.get('player_id')}) or {}
                     start = parse_iso(slot)
                     ws.append([
-                        start.strftime('%d-%m-%Y') if start else '',
-                        start.strftime('%I:%M %p') if start else '',
+                        start.astimezone(SCHEDULE_TZ).strftime('%d-%m-%Y') if start else '',
+                        start.astimezone(SCHEDULE_TZ).strftime('%I:%M %p') if start else '',
                         t, p.get('name',''), p.get('uid',''), p.get('username',''),
-                        p.get('email',''), m.get('squad',''),
-                        int(m.get('entry_fee', 0)), live_match_status(m),
-                        '', '', ''
+                        p.get('email',''), m.get('squad',''), int(m.get('entry_fee', 0)), live_match_status(m), '', '', ''
                     ])
-                candidate += datetime.timedelta(minutes=interval)
-                if candidate.hour >= 22:
-                    break
     else:
         rows = list(matches.find(query).sort('scheduled_at', 1).sort('_id', 1))
         for m in rows:
@@ -303,6 +316,8 @@ class H(BaseHTTPRequestHandler):
             except Exception: amount = 0
             if amount <= 0: return json_send(self,400,{'error':'Invalid payment amount'})
             return json_send(self,200,{'upi_id':UPI_ID,'name':UPI_NAME,'amount':amount,'upi_uri':f'upi://pay?pa={quote(UPI_ID)}&pn={quote(UPI_NAME)}&am={amount:.2f}&cu=INR'})
+        if p == '/api/tournament-configs':
+            return json_send(self,200,{'configs':get_configs()})
         if p == '/api/me':
             if not s: return json_send(self,401,{'error':'Login required'})
             r = players.find_one({'_id': ObjectId(s['player_id'])}); return json_send(self,200,{'player':player_obj(r)})
@@ -313,31 +328,20 @@ class H(BaseHTTPRequestHandler):
             return json_send(self,200,{'matches':rows})
         if p == '/api/available-matches':
             if not s: return json_send(self,401,{'error':'Login required'})
-            tournaments=['BR ₹50 Room','Lone Wolf ₹50','Lone Wolf ₹100']
+            tournaments=list(tournament_defaults().keys())
             now_local=schedule_now()
             out=[]
             for t in tournaments:
-                interval=30 if t=='BR ₹50 Room' else 20
-                local=now_local
-                minute=(local.minute // interval)*interval
-                candidate=datetime.datetime.combine(local.date(),datetime.time(local.hour,minute),tzinfo=local.tzinfo)
-                if candidate <= local:
-                    candidate += datetime.timedelta(minutes=interval)
-                if candidate.hour < 18:
-                    candidate=datetime.datetime.combine(candidate.date(),datetime.time(18,0),tzinfo=local.tzinfo)
-                elif candidate.hour >= 22:
-                    candidate=datetime.datetime.combine(candidate.date()+datetime.timedelta(days=1),datetime.time(18,0),tzinfo=local.tzinfo)
+                cfg=config_for(t); interval=cfg['interval']
+                candidate=parse_iso(next_match_time(t))
                 for _ in range(4):
+                    if not candidate: break
                     scheduled=candidate.isoformat(timespec='seconds')
                     joined=matches.count_documents({'tournament':t,'scheduled_at':scheduled})
                     mine=matches.find_one({'player_id':ObjectId(s['player_id']),'tournament':t,'scheduled_at':scheduled},{'_id':1}) is not None
-                    if t=='BR ₹50 Room':
-                        prize='1st ₹1,000 · ₹12/kill'
-                    elif t=='Lone Wolf ₹50':
-                        prize='Winner ₹80'
-                    else:
-                        prize='Winner ₹150'
-                    out.append({'tournament':t,'scheduled_at':scheduled,'entry_fee':50 if t!='Lone Wolf ₹100' else 100,'capacity':match_capacity(t),'joined':joined,'joined_by_player':mine,'prize':prize})
+                    cfg=config_for(t)
+                    prize=f"1st ₹{cfg['first_prize']}" + (f" · 2nd ₹{cfg['second_prize']}" if cfg['second_prize'] else '') + (f" · ₹{cfg['per_kill']}/kill" if cfg['per_kill'] else '')
+                    out.append({'tournament':t,'scheduled_at':scheduled,'entry_fee':cfg['entry_fee'],'capacity':cfg['capacity'],'joined':joined,'joined_by_player':mine,'prize':prize,'first_prize':cfg['first_prize'],'second_prize':cfg['second_prize'],'per_kill':cfg['per_kill'],'banner':cfg['banner']})
                     candidate += datetime.timedelta(minutes=interval)
                     if candidate.hour >= 22:
                         break
@@ -351,7 +355,7 @@ class H(BaseHTTPRequestHandler):
             rows = list(deposits.find({'player_id': ObjectId(s['player_id'])}).sort('_id',-1)); return json_send(self,200,{'deposits':rows})
         if p == '/api/public-schedule':
             # Public schedule shows real registration counts, but never exposes room credentials.
-            tournaments=['BR ₹50 Room','Lone Wolf ₹50','Lone Wolf ₹100']
+            tournaments=list(tournament_defaults().keys())
             out=[]
             for t in tournaments:
                 slot=next_match_time(t)
@@ -394,7 +398,7 @@ class H(BaseHTTPRequestHandler):
             # This lets the organiser see upcoming 30-minute BR slots (and 20-minute Lone Wolf slots)
             # before anyone joins, then publish a room for the exact slot. Existing player records are
             # merged into those generated slots so missed/late registrations remain visible.
-            tournaments=['BR ₹50 Room','Lone Wolf ₹50','Lone Wolf ₹100']
+            tournaments=list(tournament_defaults().keys())
             now_local=schedule_now()
             now_utc=datetime.datetime.now(datetime.timezone.utc)
             grouped={}
@@ -407,21 +411,8 @@ class H(BaseHTTPRequestHandler):
 
             # Generate the next 12 slots for each format. The first slot is the next slot at/after now.
             for t in tournaments:
-                interval=30 if t=='BR ₹50 Room' else 20
-                local=now_local
-                minute=(local.minute // interval)*interval
-                candidate=datetime.datetime.combine(local.date(),datetime.time(local.hour,minute),tzinfo=local.tzinfo)
-                if candidate <= local:
-                    candidate += datetime.timedelta(minutes=interval)
-                if candidate.hour < 18:
-                    candidate=datetime.datetime.combine(candidate.date(),datetime.time(18,0),tzinfo=local.tzinfo)
-                elif candidate.hour >= 22:
-                    candidate=datetime.datetime.combine(candidate.date()+datetime.timedelta(days=1),datetime.time(18,0),tzinfo=local.tzinfo)
-                for _ in range(12):
-                    add_group(t,candidate.isoformat(timespec='seconds'))
-                    candidate += datetime.timedelta(minutes=interval)
-                    if candidate.hour >= 22:
-                        break
+                for slot in upcoming_slots(t,12):
+                    add_group(t,slot)
 
             # Merge current/new-format player matches into slot control.
             # Historical records remain available in Match database / results, but
@@ -452,7 +443,7 @@ class H(BaseHTTPRequestHandler):
                 if not start:
                     continue
                 start_utc=start.astimezone(datetime.timezone.utc) if start.tzinfo else start.replace(tzinfo=datetime.timezone.utc)
-                duration=datetime.timedelta(minutes=30 if g['tournament']=='BR ₹50 Room' else 20)
+                duration=datetime.timedelta(minutes=match_duration(g['tournament']))
                 if start_utc <= now_utc < start_utc+duration:
                     status='Live'
                 elif start_utc > now_utc:
@@ -466,7 +457,11 @@ class H(BaseHTTPRequestHandler):
 
             # Upcoming slots first, with actual registered-player history still included.
             groups.sort(key=lambda x:x.get('scheduled_at') or '')
-            return json_send(self,200,{'players':ps,'deposits':dep,'withdrawals':wd,'matches':mt,'match_groups':groups})
+            ref_rows=[]
+            for rr in referrals.find({}).sort('_id',-1):
+                ref=players.find_one({'_id':rr.get('referrer_id')}) or {}; newp=players.find_one({'_id':rr.get('referred_id')}) or {}
+                ref_rows.append({'id':str(rr['_id']),'referrer_name':ref.get('name',''),'referrer_username':ref.get('username',''),'referrer_uid':ref.get('uid',''),'referred_name':newp.get('name',''),'referred_username':newp.get('username',''),'referred_uid':newp.get('uid',''),'points_awarded':rr.get('points_awarded',10),'created_at':rr.get('created_at')})
+            return json_send(self,200,{'players':ps,'deposits':dep,'withdrawals':wd,'matches':mt,'match_groups':groups,'configs':get_configs(),'referrals':ref_rows})
         return json_send(self,404,{'error':'Not found'})
 
     def api_post(self,p,d):
@@ -477,10 +472,23 @@ class H(BaseHTTPRequestHandler):
                 if len(d['password']) < 6: return json_send(self,400,{'error':'Password must be at least 6 characters'})
                 uid = str(d['uid']).strip()
                 if not uid.isdigit() or len(uid) != 10: return json_send(self,400,{'error':'Free Fire UID must be exactly 10 digits'})
-                doc = {'username':d['username'].strip().lower(),'name':d['name'].strip(),'email':d['email'].strip().lower(),'uid':uid,'password_hash':ph(d['password']),'points':0,'blocked':False,'created_at':now()}
+                doc = {'username':d['username'].strip().lower(),'name':d['name'].strip(),'email':d['email'].strip().lower(),'uid':uid,'password_hash':ph(d['password']),'points':0,'blocked':False,'created_at':now(),'referral_code':'','referral_points':0}
                 try: r = players.insert_one(doc)
                 except DuplicateKeyError: return json_send(self,409,{'error':'Username, email or UID already exists'})
-                doc['_id'] = r.inserted_id; tok = secrets.token_urlsafe(32); SESSIONS[tok]={'player_id':str(r.inserted_id),'admin':False}
+                doc['_id'] = r.inserted_id
+                referral_code='BOOYAH-'+str(r.inserted_id)[-8:].upper()
+                players.update_one({'_id':r.inserted_id},{'$set':{'referral_code':referral_code}}); doc['referral_code']=referral_code
+                referral_input=str(d.get('referral_code','')).strip().upper()
+                if referral_input:
+                    ref=players.find_one({'referral_code':referral_input})
+                    if not ref or ref['_id']==r.inserted_id:
+                        players.delete_one({'_id':r.inserted_id}); return json_send(self,400,{'error':'Invalid referral code'})
+                    try:
+                        referrals.insert_one({'referrer_id':ref['_id'],'referred_id':r.inserted_id,'referral_code':referral_input,'points_awarded':10,'created_at':now()})
+                        players.update_one({'_id':ref['_id' ]},{'$inc':{'points':10,'referral_points':10}})
+                    except DuplicateKeyError:
+                        pass
+                tok = secrets.token_urlsafe(32); SESSIONS[tok]={'player_id':str(r.inserted_id),'admin':False}
                 return json_send(self,200,{'token':tok,'player':player_obj(doc)})
 
             if p == '/api/login':
@@ -509,7 +517,7 @@ class H(BaseHTTPRequestHandler):
                 if deposits.find_one({'reference':ref}): return json_send(self,409,{'error':'This transaction ID has already been submitted'})
                 deposits.insert_one({'player_id':ObjectId(s['player_id']),'amount':amt,'reference':ref,'status':'Pending','created_at':now(),'submitted_after_payment':True}); return json_send(self,200,{'ok':True})
             if p == '/api/match' and s:
-                prices={'BR ₹50 Room':50,'Lone Wolf ₹50':50,'Lone Wolf ₹100':100}; t=d.get('tournament'); fee=prices.get(t); squad=d.get('squad','').strip()
+                t=d.get('tournament'); cfg=config_for(t) if t in tournament_defaults() else None; fee=cfg['entry_fee'] if cfg else None; squad=d.get('squad','').strip()
                 if not fee or not squad:return json_send(self,400,{'error':'Invalid match details'})
                 pid=ObjectId(s['player_id']); r=players.find_one({'_id':pid})
                 if not r:return json_send(self,404,{'error':'Player account not found'})
@@ -551,6 +559,24 @@ class H(BaseHTTPRequestHandler):
                 x=withdrawals.find_one({'_id':oid(d.get('id')),'status':'Pending'})
                 if not x:return json_send(self,400,{'error':'Withdrawal is not pending'})
                 withdrawals.update_one({'_id':x['_id']},{'$set':{'status':'Rejected','completed_at':now(),'admin_note':d.get('note','Rejected')}}); players.update_one({'_id':x['player_id']},{'$inc':{'points':x['amount']}}); return json_send(self,200,{'ok':True})
+            if p == '/api/admin/referrals':
+                rows=[]
+                for r in referrals.find({}).sort('_id',-1):
+                    ref=players.find_one({'_id':r.get('referrer_id')}) or {}; newp=players.find_one({'_id':r.get('referred_id')}) or {}
+                    rows.append({'id':str(r['_id']),'referrer_name':ref.get('name',''),'referrer_username':ref.get('username',''),'referrer_uid':ref.get('uid',''),'referred_name':newp.get('name',''),'referred_username':newp.get('username',''),'referred_uid':newp.get('uid',''),'points_awarded':r.get('points_awarded',10),'created_at':r.get('created_at')})
+                return json_send(self,200,{'referrals':rows})
+            if p == '/api/admin/tournament-config':
+                t=str(d.get('tournament','')); cfg=config_for(t) if t in tournament_defaults() else None
+                if not cfg:return json_send(self,400,{'error':'Unknown tournament'})
+                fields=('entry_fee','first_prize','second_prize','per_kill')
+                vals={}
+                for f in fields:
+                    try: v=int(d.get(f,cfg[f]))
+                    except Exception:return json_send(self,400,{'error':'All price values must be whole numbers'})
+                    if v<0 or v>1000000:return json_send(self,400,{'error':'Price values must be between 0 and 1,000,000'})
+                    vals[f]=v
+                tournament_configs.update_one({'tournament':t},{'$set':{'tournament':t,**vals,'updated_at':now()}},upsert=True)
+                return json_send(self,200,{'ok':True,'config':config_for(t)})
             if p == '/api/admin/player/add-points':
                 pid=oid(d.get('id'))
                 if not pid:return json_send(self,400,{'error':'Invalid player ID'})
@@ -597,7 +623,7 @@ class H(BaseHTTPRequestHandler):
             if p == '/api/admin/match/move-next':
                 mid=oid(d.get('id')); m=matches.find_one({'_id':mid})
                 if not m:return json_send(self,404,{'error':'Match not found'})
-                t=m.get('tournament'); interval=30 if t=='BR ₹50 Room' else 20
+                t=m.get('tournament'); interval=config_for(t)['interval']
                 current=parse_iso(m.get('scheduled_at'))
                 if not current:return json_send(self,400,{'error':'Match has no valid scheduled time'})
                 candidate=current + datetime.timedelta(minutes=interval)
