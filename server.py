@@ -741,7 +741,7 @@ class H(BaseHTTPRequestHandler):
                 dep_doc={'player_id':pid,'amount':amt,'reference':reference,'status':'Created','created_at':now(),'submitted_after_payment':False,'gateway':PAYMENT_PROVIDER}
                 try:
                     ins=deposits.insert_one(dep_doc)
-                    callback_url=f'{PUBLIC_BASE_URL}/payment/success?reference={quote(reference)}'
+                    callback_url=f'{PUBLIC_BASE_URL}/player-dashboard.html?payment=success&reference={quote(reference)}'
                     payload={'amount':amt*100,'currency':'INR','accept_partial':False,'description':f'BOOYAH ARENA wallet deposit ₹{amt}','reference_id':reference,'callback_url':callback_url,'callback_method':'get','reminder_enable':False,'notes':{'deposit_id':str(ins.inserted_id),'player_id':str(pid)}}
                     link=razorpay_api('/v1/payment_links', payload)
                     payment_url=link.get('short_url') or link.get('url')
