@@ -454,6 +454,19 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if p.startswith('/api/'): return self.api_get(p)
+        # Razorpay may return the customer to this endpoint after payment.
+        # Redirect to the real dashboard so a gateway callback can never land
+        # on a missing route / show a plain 404 page.
+        if p == '/payment/success':
+            q = parse_qs(urlparse(self.path).query)
+            ref = q.get('reference', [''])[0].strip()
+            target = '/player-dashboard.html?payment=success'
+            if ref:
+                target += '&reference=' + quote(ref)
+            self.send_response(303)
+            self.send_header('Location', target)
+            self.end_headers()
+            return
         if p == '/': p = '/index.html'
         fp = os.path.join(BASE, p.lstrip('/'))
         if not os.path.isfile(fp): return self.send_error(404)
@@ -462,6 +475,20 @@ class H(BaseHTTPRequestHandler):
         data = open(fp,'rb').read(); self.send_response(200); self.send_header('Content-Type',typ); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_POST(self):
         p = urlparse(self.path).path
+        if p == '/payment/success':
+            # Be tolerant if the gateway posts the callback instead of GET.
+            n = int(self.headers.get('Content-Length','0'))
+            raw = self.rfile.read(n) if n else b''
+            form = parse_qs(raw.decode('utf-8', errors='ignore'))
+            q = parse_qs(urlparse(self.path).query)
+            ref = (q.get('reference', [''])[0] or form.get('reference', [''])[0]).strip()
+            target = '/player-dashboard.html?payment=success'
+            if ref:
+                target += '&reference=' + quote(ref)
+            self.send_response(303)
+            self.send_header('Location', target)
+            self.end_headers()
+            return
         if p == '/api/webhooks/razorpay':
             n = int(self.headers.get('Content-Length','0'))
             raw = self.rfile.read(n)
@@ -714,7 +741,7 @@ class H(BaseHTTPRequestHandler):
                 dep_doc={'player_id':pid,'amount':amt,'reference':reference,'status':'Created','created_at':now(),'submitted_after_payment':False,'gateway':PAYMENT_PROVIDER}
                 try:
                     ins=deposits.insert_one(dep_doc)
-                    callback_url=f'{PUBLIC_BASE_URL}/player-dashboard.html?payment=success&reference={quote(reference)}'
+                    callback_url=f'{PUBLIC_BASE_URL}/payment/success?reference={quote(reference)}'
                     payload={'amount':amt*100,'currency':'INR','accept_partial':False,'description':f'BOOYAH ARENA wallet deposit ₹{amt}','reference_id':reference,'callback_url':callback_url,'callback_method':'get','reminder_enable':False,'notes':{'deposit_id':str(ins.inserted_id),'player_id':str(pid)}}
                     link=razorpay_api('/v1/payment_links', payload)
                     payment_url=link.get('short_url') or link.get('url')
