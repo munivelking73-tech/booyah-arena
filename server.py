@@ -1,4 +1,4 @@
-import os, json, secrets, hashlib, datetime, re
+import os, json, secrets, hashlib, datetime, re, base64, hmac, urllib.request, urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
 from bson import ObjectId
@@ -26,6 +26,11 @@ ADMIN_USER = os.environ.get('BOOYAH_ADMIN_USER', 'Munivel@9866')
 ADMIN_PASS = os.environ.get('BOOYAH_ADMIN_PASS', 'MuNiVel@1143')
 UPI_ID = os.environ.get('BOOYAH_UPI_ID', '9940879866@nyes')
 UPI_NAME = os.environ.get('BOOYAH_UPI_NAME', 'BOOYAH ARENA')
+PAYMENT_PROVIDER = os.environ.get('PAYMENT_PROVIDER', 'razorpay').strip().lower()
+RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '').strip()
+RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '').strip()
+RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '').strip()
+PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', os.environ.get('RENDER_EXTERNAL_URL', '')).rstrip('/')
 
 # Firebase / FCM configuration.
 # The web values are public Firebase client configuration; the service-account JSON is secret.
@@ -63,6 +68,60 @@ def schedule_now():
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+def payment_gateway_configured():
+    return PAYMENT_PROVIDER == 'razorpay' and bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and PUBLIC_BASE_URL)
+
+def razorpay_api(path, payload):
+    if not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET):
+        raise RuntimeError('Razorpay is not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Render environment variables.')
+    raw = json.dumps(payload).encode('utf-8')
+    token = base64.b64encode(f'{RAZORPAY_KEY_ID}:{RAZORPAY_KEY_SECRET}'.encode()).decode()
+    req = urllib.request.Request('https://api.razorpay.com' + path, data=raw, method='POST', headers={
+        'Authorization': 'Basic ' + token,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=20) as res:
+            return json.loads(res.read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode('utf-8', errors='replace')
+        try: detail = json.loads(body).get('error', {}).get('description') or body
+        except Exception: detail = body
+        raise RuntimeError(f'Razorpay error: {detail}')
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f'Could not reach Razorpay: {exc.reason}')
+
+def verify_razorpay_webhook(raw_body, signature):
+    if not RAZORPAY_WEBHOOK_SECRET:
+        return False
+    expected = hmac.new(RAZORPAY_WEBHOOK_SECRET.encode('utf-8'), raw_body, hashlib.sha256).hexdigest()
+    return bool(signature) and hmac.compare_digest(expected, signature)
+
+def process_razorpay_event(event):
+    event_name = str(event.get('event', ''))
+    payload = event.get('payload') or {}
+    link_entity = ((payload.get('payment_link') or {}).get('entity') or {})
+    if not link_entity:
+        return False, 'No payment link payload'
+    link_id = str(link_entity.get('id') or '').strip()
+    reference = str(link_entity.get('reference_id') or '').strip()
+    amount_paid = int(link_entity.get('amount_paid') or link_entity.get('amount') or 0)
+    if event_name == 'payment_link.paid':
+        dep = deposits.find_one({'$or': ([{'gateway_payment_link_id': link_id}, {'reference': reference}] if link_id and reference else ([{'gateway_payment_link_id': link_id}] if link_id else [{'reference': reference}]))})
+        if not dep:
+            return False, 'Deposit not found'
+        if amount_paid and amount_paid != int(dep.get('amount', 0)) * 100:
+            return False, 'Payment amount mismatch'
+        result = deposits.update_one({'_id': dep['_id'], 'status': {'$ne': 'Paid'}}, {'$set': {'status': 'Paid', 'paid_at': now(), 'gateway_event': event_name, 'gateway_payment_link_id': link_id or dep.get('gateway_payment_link_id')}})
+        if result.modified_count == 1:
+            players.update_one({'_id': dep['player_id']}, {'$inc': {'points': int(dep['amount'])}})
+        return True, 'Payment recorded'
+    if event_name in ('payment_link.cancelled', 'payment_link.expired'):
+        deposits.update_one({'$or': ([{'gateway_payment_link_id': link_id}, {'reference': reference}] if link_id and reference else ([{'gateway_payment_link_id': link_id}] if link_id else [{'reference': reference}])), 'status': {'$in': ['Created', 'Pending']}}, {'$set': {'status': 'Cancelled' if event_name.endswith('cancelled') else 'Expired', 'gateway_event': event_name, 'updated_at': now()}})
+        return True, 'Payment link status recorded'
+    return True, 'Event ignored'
 
 def firebase_web_config():
     return {
@@ -403,6 +462,19 @@ class H(BaseHTTPRequestHandler):
         data = open(fp,'rb').read(); self.send_response(200); self.send_header('Content-Type',typ); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_POST(self):
         p = urlparse(self.path).path
+        if p == '/api/webhooks/razorpay':
+            n = int(self.headers.get('Content-Length','0'))
+            raw = self.rfile.read(n)
+            signature = self.headers.get('X-Razorpay-Signature','')
+            if not verify_razorpay_webhook(raw, signature):
+                return json_send(self,401,{'error':'Invalid Razorpay webhook signature'})
+            try: event = json.loads(raw or b'{}')
+            except Exception: return json_send(self,400,{'error':'Invalid webhook JSON'})
+            try:
+                ok, message = process_razorpay_event(event)
+                return json_send(self,200,{'ok':ok,'message':message})
+            except Exception as exc:
+                return json_send(self,500,{'error':str(exc)})
         try: d = read_json(self)
         except Exception: return json_send(self,400,{'error':'Invalid JSON'})
         if p.startswith('/api/'): return self.api_post(p,d)
@@ -410,7 +482,14 @@ class H(BaseHTTPRequestHandler):
 
     def api_get(self,p):
         s = auth(self)
-        if p == '/api/upi-qr':
+        if p == '/api/deposit-status':
+            if not s: return json_send(self,401,{'error':'Login required'})
+            reference = parse_qs(urlparse(self.path).query).get('reference',[''])[0].strip()
+            if not reference: return json_send(self,400,{'error':'Payment reference is required'})
+            dep = deposits.find_one({'reference':reference, 'player_id':ObjectId(s['player_id'])})
+            if not dep: return json_send(self,404,{'error':'Deposit not found'})
+            return json_send(self,200,{'status':dep.get('status'),'amount':dep.get('amount'),'reference':reference,'payment_url':dep.get('payment_url','')})
+        if p == '/api/upi-qr' and not payment_gateway_configured():
             if not s: return json_send(self,401,{'error':'Login required'})
             raw_amount = parse_qs(urlparse(self.path).query).get('amount',[''])[0]
             try: amount = int(raw_amount)
@@ -622,6 +701,31 @@ class H(BaseHTTPRequestHandler):
                 token=self.headers.get('Authorization','').replace('Bearer ','').strip(); SESSIONS.pop(token,None); return json_send(self,200,{'ok':True})
 
             s=auth(self)
+            if p == '/api/deposit/create' and s:
+                if PAYMENT_PROVIDER != 'razorpay': return json_send(self,503,{'error':'Configured payment provider is not supported'})
+                if not payment_gateway_configured(): return json_send(self,503,{'error':'Razorpay payment gateway is not configured yet. Add the gateway keys in Render Environment Variables.'})
+                try: amt=int(d.get('amount',0))
+                except Exception: amt=0
+                if amt < 10: return json_send(self,400,{'error':'Deposit amount must be at least ₹10'})
+                pid=ObjectId(s['player_id']); player=players.find_one({'_id':pid})
+                if not player: return json_send(self,404,{'error':'Player account not found'})
+                reference='BA-' + secrets.token_hex(10).upper()
+                while deposits.find_one({'reference':reference}): reference='BA-' + secrets.token_hex(10).upper()
+                dep_doc={'player_id':pid,'amount':amt,'reference':reference,'status':'Created','created_at':now(),'submitted_after_payment':False,'gateway':PAYMENT_PROVIDER}
+                try:
+                    ins=deposits.insert_one(dep_doc)
+                    callback_url=f'{PUBLIC_BASE_URL}/player-dashboard.html?payment=success&reference={quote(reference)}'
+                    payload={'amount':amt*100,'currency':'INR','accept_partial':False,'description':f'BOOYAH ARENA wallet deposit ₹{amt}','reference_id':reference,'callback_url':callback_url,'callback_method':'get','reminder_enable':False,'notes':{'deposit_id':str(ins.inserted_id),'player_id':str(pid)}}
+                    link=razorpay_api('/v1/payment_links', payload)
+                    payment_url=link.get('short_url') or link.get('url')
+                    if not payment_url: raise RuntimeError('Razorpay did not return a payment URL')
+                    deposits.update_one({'_id':ins.inserted_id},{'$set':{'gateway_payment_link_id':link.get('id'),'payment_url':payment_url,'gateway_status':link.get('status','created')}})
+                    return json_send(self,200,{'ok':True,'reference':reference,'amount':amt,'status':'Created','payment_url':payment_url})
+                except Exception as exc:
+                    try: deposits.delete_one({'_id':ins.inserted_id})
+                    except Exception: pass
+                    return json_send(self,502,{'error':str(exc)})
+
             if p == '/api/notifications/register-token' and s:
                 token=str(d.get('token','')).strip()
                 platform=str(d.get('platform','web')).strip().lower()[:20]

@@ -18,6 +18,16 @@ services:
         value: 9940879866@nyes
       - key: BOOYAH_UPI_NAME
         value: BOOYAH ARENA
+      - key: PAYMENT_PROVIDER
+        value: razorpay
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
       - key: FIREBASE_WEB_API_KEY
         sync: false
       - key: FIREBASE_WEB_AUTH_DOMAIN
