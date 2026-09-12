@@ -1,11 +1,10 @@
-import os, json, secrets, hashlib, datetime, re, base64, hmac, urllib.request, urllib.error
+import os, json, secrets, hashlib, datetime, re
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
 from bson import ObjectId
-from pymongo import MongoClient, ASCENDING
+from pymongo import ReturnDocument, MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
 from io import BytesIO
-import qrcode
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -24,13 +23,10 @@ MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://127.0.0.1:27017/')
 DB_NAME = os.environ.get('MONGO_DB', 'booyah_arena')
 ADMIN_USER = os.environ.get('BOOYAH_ADMIN_USER', 'Munivel@9866')
 ADMIN_PASS = os.environ.get('BOOYAH_ADMIN_PASS', 'MuNiVel@1143')
-UPI_ID = os.environ.get('BOOYAH_UPI_ID', '9940879866@nyes')
-UPI_NAME = os.environ.get('BOOYAH_UPI_NAME', 'BOOYAH ARENA')
-PAYMENT_PROVIDER = os.environ.get('PAYMENT_PROVIDER', 'razorpay').strip().lower()
-RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '').strip()
-RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '').strip()
-RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '').strip()
-PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', os.environ.get('RENDER_EXTERNAL_URL', '')).rstrip('/')
+UPI_PHONE = os.environ.get('BOOYAH_UPI_PHONE', '9940879866').strip()
+UPI_NAME = os.environ.get('BOOYAH_UPI_NAME', 'BOOYAH ARENA').strip()
+UPI_PHONE = os.environ.get('BOOYAH_UPI_PHONE', '9940879866').strip()
+UPI_NAME = os.environ.get('BOOYAH_UPI_NAME', 'BOOYAH ARENA').strip()
 
 # Firebase / FCM configuration.
 # The web values are public Firebase client configuration; the service-account JSON is secret.
@@ -56,6 +52,7 @@ rooms = db.rooms
 referrals = db.referrals
 tournament_configs = db.tournament_configs
 admin_actions = db.admin_actions
+password_resets = db.password_resets
 SESSIONS = {}
 
 # Tournament schedule timezone: India Standard Time (IST, UTC+05:30).
@@ -68,60 +65,6 @@ def schedule_now():
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
-
-def payment_gateway_configured():
-    return PAYMENT_PROVIDER == 'razorpay' and bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and PUBLIC_BASE_URL)
-
-def razorpay_api(path, payload):
-    if not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET):
-        raise RuntimeError('Razorpay is not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Render environment variables.')
-    raw = json.dumps(payload).encode('utf-8')
-    token = base64.b64encode(f'{RAZORPAY_KEY_ID}:{RAZORPAY_KEY_SECRET}'.encode()).decode()
-    req = urllib.request.Request('https://api.razorpay.com' + path, data=raw, method='POST', headers={
-        'Authorization': 'Basic ' + token,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=20) as res:
-            return json.loads(res.read().decode('utf-8'))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode('utf-8', errors='replace')
-        try: detail = json.loads(body).get('error', {}).get('description') or body
-        except Exception: detail = body
-        raise RuntimeError(f'Razorpay error: {detail}')
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f'Could not reach Razorpay: {exc.reason}')
-
-def verify_razorpay_webhook(raw_body, signature):
-    if not RAZORPAY_WEBHOOK_SECRET:
-        return False
-    expected = hmac.new(RAZORPAY_WEBHOOK_SECRET.encode('utf-8'), raw_body, hashlib.sha256).hexdigest()
-    return bool(signature) and hmac.compare_digest(expected, signature)
-
-def process_razorpay_event(event):
-    event_name = str(event.get('event', ''))
-    payload = event.get('payload') or {}
-    link_entity = ((payload.get('payment_link') or {}).get('entity') or {})
-    if not link_entity:
-        return False, 'No payment link payload'
-    link_id = str(link_entity.get('id') or '').strip()
-    reference = str(link_entity.get('reference_id') or '').strip()
-    amount_paid = int(link_entity.get('amount_paid') or link_entity.get('amount') or 0)
-    if event_name == 'payment_link.paid':
-        dep = deposits.find_one({'$or': ([{'gateway_payment_link_id': link_id}, {'reference': reference}] if link_id and reference else ([{'gateway_payment_link_id': link_id}] if link_id else [{'reference': reference}]))})
-        if not dep:
-            return False, 'Deposit not found'
-        if amount_paid and amount_paid != int(dep.get('amount', 0)) * 100:
-            return False, 'Payment amount mismatch'
-        result = deposits.update_one({'_id': dep['_id'], 'status': {'$ne': 'Paid'}}, {'$set': {'status': 'Paid', 'paid_at': now(), 'gateway_event': event_name, 'gateway_payment_link_id': link_id or dep.get('gateway_payment_link_id')}})
-        if result.modified_count == 1:
-            players.update_one({'_id': dep['player_id']}, {'$inc': {'points': int(dep['amount'])}})
-        return True, 'Payment recorded'
-    if event_name in ('payment_link.cancelled', 'payment_link.expired'):
-        deposits.update_one({'$or': ([{'gateway_payment_link_id': link_id}, {'reference': reference}] if link_id and reference else ([{'gateway_payment_link_id': link_id}] if link_id else [{'reference': reference}])), 'status': {'$in': ['Created', 'Pending']}}, {'$set': {'status': 'Cancelled' if event_name.endswith('cancelled') else 'Expired', 'gateway_event': event_name, 'updated_at': now()}})
-        return True, 'Payment link status recorded'
-    return True, 'Event ignored'
 
 def firebase_web_config():
     return {
@@ -324,15 +267,19 @@ def auth(h, admin=False):
     return session
 
 def player_obj(r):
-    return {'id': str(r['_id']), 'username': r['username'], 'name': r['name'], 'email': r['email'], 'uid': r['uid'], 'points': r.get('points',0), 'blocked': bool(r.get('blocked', False)), 'created': r['created_at'], 'last_login_at': r.get('last_login_at'), 'referral_code': r.get('referral_code',''), 'referral_points': r.get('referral_points',0)}
+    return {'id': str(r['_id']), 'username': r['username'], 'name': r['name'], 'email': r['email'], 'phone': r.get('phone',''), 'uid': r['uid'], 'points': r.get('points',0), 'blocked': bool(r.get('blocked', False)), 'created': r['created_at'], 'last_login_at': r.get('last_login_at'), 'referral_code': r.get('referral_code',''), 'referral_points': r.get('referral_points',0)}
 
 def init_indexes():
     players.create_index([('username', ASCENDING)], unique=True)
     players.create_index([('email', ASCENDING)], unique=True)
     players.create_index([('uid', ASCENDING)], unique=True)
+    players.create_index([('phone', ASCENDING)])
+    password_resets.create_index([('player_id', ASCENDING), ('status', ASCENDING)])
     deposits.create_index([('player_id', ASCENDING)])
     matches.create_index([('player_id', ASCENDING)])
     withdrawals.create_index([('player_id', ASCENDING)])
+    withdrawals.create_index([('player_id', ASCENDING), ('status', ASCENDING)])
+    withdrawals.create_index([('status', ASCENDING), ('created_at', -1)])
     referrals.create_index([('referrer_id', ASCENDING)])
     referrals.create_index([('referred_id', ASCENDING)], unique=True)
     tournament_configs.create_index([('tournament', ASCENDING)], unique=True)
@@ -457,16 +404,6 @@ class H(BaseHTTPRequestHandler):
         # Razorpay may return the customer to this endpoint after payment.
         # Redirect to the real dashboard so a gateway callback can never land
         # on a missing route / show a plain 404 page.
-        if p == '/payment/success':
-            q = parse_qs(urlparse(self.path).query)
-            ref = q.get('reference', [''])[0].strip()
-            target = '/player-dashboard.html?payment=success'
-            if ref:
-                target += '&reference=' + quote(ref)
-            self.send_response(303)
-            self.send_header('Location', target)
-            self.end_headers()
-            return
         if p == '/': p = '/index.html'
         fp = os.path.join(BASE, p.lstrip('/'))
         if not os.path.isfile(fp): return self.send_error(404)
@@ -489,19 +426,6 @@ class H(BaseHTTPRequestHandler):
             self.send_header('Location', target)
             self.end_headers()
             return
-        if p == '/api/webhooks/razorpay':
-            n = int(self.headers.get('Content-Length','0'))
-            raw = self.rfile.read(n)
-            signature = self.headers.get('X-Razorpay-Signature','')
-            if not verify_razorpay_webhook(raw, signature):
-                return json_send(self,401,{'error':'Invalid Razorpay webhook signature'})
-            try: event = json.loads(raw or b'{}')
-            except Exception: return json_send(self,400,{'error':'Invalid webhook JSON'})
-            try:
-                ok, message = process_razorpay_event(event)
-                return json_send(self,200,{'ok':ok,'message':message})
-            except Exception as exc:
-                return json_send(self,500,{'error':str(exc)})
         try: d = read_json(self)
         except Exception: return json_send(self,400,{'error':'Invalid JSON'})
         if p.startswith('/api/'): return self.api_post(p,d)
@@ -516,23 +440,13 @@ class H(BaseHTTPRequestHandler):
             dep = deposits.find_one({'reference':reference, 'player_id':ObjectId(s['player_id'])})
             if not dep: return json_send(self,404,{'error':'Deposit not found'})
             return json_send(self,200,{'status':dep.get('status'),'amount':dep.get('amount'),'reference':reference,'payment_url':dep.get('payment_url','')})
-        if p == '/api/upi-qr' and not payment_gateway_configured():
-            if not s: return json_send(self,401,{'error':'Login required'})
-            raw_amount = parse_qs(urlparse(self.path).query).get('amount',[''])[0]
-            try: amount = int(raw_amount)
-            except Exception: amount = 0
-            if amount <= 0: return json_send(self,400,{'error':'Invalid payment amount'})
-            upi_uri = f'upi://pay?pa={quote(UPI_ID)}&pn={quote(UPI_NAME)}&am={amount:.2f}&cu=INR'
-            img = qrcode.make(upi_uri)
-            buf = BytesIO(); img.save(buf, format='PNG'); data = buf.getvalue()
-            self.send_response(200); self.send_header('Content-Type','image/png'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p == '/api/upi-details':
             if not s: return json_send(self,401,{'error':'Login required'})
             raw_amount = parse_qs(urlparse(self.path).query).get('amount',[''])[0]
             try: amount = int(raw_amount)
             except Exception: amount = 0
             if amount <= 0: return json_send(self,400,{'error':'Invalid payment amount'})
-            return json_send(self,200,{'upi_id':UPI_ID,'name':UPI_NAME,'amount':amount,'upi_uri':f'upi://pay?pa={quote(UPI_ID)}&pn={quote(UPI_NAME)}&am={amount:.2f}&cu=INR'})
+            return json_send(self,200,{'upi_phone':UPI_PHONE,'name':UPI_NAME,'amount':amount})
         if p == '/api/tournament-configs':
             return json_send(self,200,{'configs':get_configs()})
         if p == '/api/me':
@@ -600,16 +514,16 @@ class H(BaseHTTPRequestHandler):
             return json_send(self,200,{'rooms':rows})
         if p == '/api/admin/data':
             if not auth(self,True): return json_send(self,401,{'error':'Admin login required'})
-            ps = list(players.find({}, {'username':1,'name':1,'email':1,'uid':1,'points':1,'blocked':1,'created_at':1,'last_login_at':1}).sort('_id',-1))
+            ps = list(players.find({}, {'username':1,'name':1,'email':1,'phone':1,'uid':1,'points':1,'blocked':1,'created_at':1,'last_login_at':1}).sort('_id',-1))
             active_player_ids={sess.get('player_id') for sess in SESSIONS.values() if not sess.get('admin') and sess.get('player_id')}
             for pp in ps:
                 pp['logged_in']=str(pp['_id']) in active_player_ids
-            dep = list(deposits.find({}).sort('_id',-1)); wd = list(withdrawals.find({}).sort('_id',-1)); mt = list(matches.find({}).sort('_id',-1))
+            dep = list(deposits.find({}).sort('_id',-1)); wd = list(withdrawals.find({}).sort('_id',-1)); mt = list(matches.find({}).sort('_id',-1)); resets=list(password_resets.find({}).sort('_id',-1))
             pmap = {str(x['_id']): x for x in players.find({})}
             for arr in (dep,wd,mt):
                 for x in arr:
                     p = pmap.get(str(x.get('player_id')),{})
-                    x['name'] = p.get('name',''); x['uid'] = p.get('uid',''); x['email'] = p.get('email','');
+                    x['name'] = p.get('name',''); x['uid'] = p.get('uid',''); x['email'] = p.get('email',''); x['phone'] = p.get('phone','');
                     if x in mt: x['display_status'] = live_match_status(x)
             # Build a real timetable for the admin, not only slots that already have players.
             # This lets the organiser see upcoming 30-minute BR slots (and 20-minute Lone Wolf slots)
@@ -678,20 +592,25 @@ class H(BaseHTTPRequestHandler):
             for rr in referrals.find({}).sort('_id',-1):
                 ref=players.find_one({'_id':rr.get('referrer_id')}) or {}; newp=players.find_one({'_id':rr.get('referred_id')}) or {}
                 ref_rows.append({'id':str(rr['_id']),'referrer_name':ref.get('name',''),'referrer_username':ref.get('username',''),'referrer_uid':ref.get('uid',''),'referred_name':newp.get('name',''),'referred_username':newp.get('username',''),'referred_uid':newp.get('uid',''),'points_awarded':rr.get('points_awarded',10),'created_at':rr.get('created_at')})
-            return json_send(self,200,{'players':ps,'deposits':dep,'withdrawals':wd,'matches':mt,'match_groups':groups,'configs':get_configs(),'referrals':ref_rows})
+            return json_send(self,200,{'players':ps,'deposits':dep,'withdrawals':wd,'matches':mt,'match_groups':groups,'configs':get_configs(),'referrals':ref_rows,'password_resets':[{'id':str(x['_id']),'username':x.get('username',''),'email':x.get('email',''),'phone':x.get('phone',''),'uid':x.get('uid',''),'status':x.get('status','Pending'),'created_at':x.get('created_at'),'reviewed_at':x.get('reviewed_at'),'admin_note':x.get('admin_note','')} for x in resets]})
         return json_send(self,404,{'error':'Not found'})
 
     def api_post(self,p,d):
         try:
             if p == '/api/register':
-                for k in ('username','name','email','uid','password'):
-                    if not d.get(k): return json_send(self,400,{'error':'All fields are required'})
-                if len(d['password']) < 6: return json_send(self,400,{'error':'Password must be at least 6 characters'})
-                uid = str(d['uid']).strip()
+                for k in ('username','email','phone','uid','password'):
+                    if not d.get(k): return json_send(self,400,{'error':'Free Fire username, Gmail, phone number, UID and password are required'})
+                username=str(d['username']).strip().lower(); email=str(d['email']).strip().lower(); phone=re.sub(r'\D','',str(d['phone']))
+                uid=str(d['uid']).strip(); password=str(d['password'])
+                if len(username)<3 or len(username)>40: return json_send(self,400,{'error':'Free Fire username must be 3-40 characters'})
+                if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$',email): return json_send(self,400,{'error':'Enter a valid Gmail address'})
+                if not email.endswith('@gmail.com'): return json_send(self,400,{'error':'Please use a Gmail address'})
+                if not re.match(r'^[6-9]\d{9}$',phone): return json_send(self,400,{'error':'Enter a valid 10-digit Indian phone number'})
                 if not uid.isdigit() or len(uid) != 10: return json_send(self,400,{'error':'Free Fire UID must be exactly 10 digits'})
-                doc = {'username':d['username'].strip().lower(),'name':d['name'].strip(),'email':d['email'].strip().lower(),'uid':uid,'password_hash':ph(d['password']),'points':0,'blocked':False,'created_at':now(),'referral_code':'','referral_points':0}
+                if len(password) < 6: return json_send(self,400,{'error':'Password must be at least 6 characters'})
+                doc = {'username':username,'name':username,'email':email,'phone':phone,'uid':uid,'password_hash':ph(password),'points':0,'blocked':False,'created_at':now(),'referral_code':'','referral_points':0}
                 try: r = players.insert_one(doc)
-                except DuplicateKeyError: return json_send(self,409,{'error':'Username, email or UID already exists'})
+                except DuplicateKeyError: return json_send(self,409,{'error':'Free Fire username, Gmail or UID already exists'})
                 doc['_id'] = r.inserted_id
                 referral_code='BOOYAH-'+str(r.inserted_id)[-8:].upper()
                 players.update_one({'_id':r.inserted_id},{'$set':{'referral_code':referral_code}}); doc['referral_code']=referral_code
@@ -702,9 +621,8 @@ class H(BaseHTTPRequestHandler):
                         players.delete_one({'_id':r.inserted_id}); return json_send(self,400,{'error':'Invalid referral code'})
                     try:
                         referrals.insert_one({'referrer_id':ref['_id'],'referred_id':r.inserted_id,'referral_code':referral_input,'points_awarded':10,'created_at':now()})
-                        players.update_one({'_id':ref['_id' ]},{'$inc':{'points':10,'referral_points':10}})
-                    except DuplicateKeyError:
-                        pass
+                        players.update_one({'_id':ref['_id']},{'$inc':{'points':10,'referral_points':10}})
+                    except DuplicateKeyError: pass
                 tok = secrets.token_urlsafe(32); SESSIONS[tok]={'player_id':str(r.inserted_id),'admin':False}
                 return json_send(self,200,{'token':tok,'player':player_obj(doc)})
 
@@ -716,7 +634,7 @@ class H(BaseHTTPRequestHandler):
                 # Usernames are stored lowercase, so use an exact indexed lookup.
                 # This avoids a case-insensitive regex scan and makes login much faster.
                 ident_value = ident.lower()
-                r = players.find_one({'$or':[{'username':ident_value},{'email':ident_value}], 'password_hash':ph(password)})
+                r = players.find_one({'$or':[{'username':ident_value},{'email':ident_value},{'phone':ident_value}], 'password_hash':ph(password)})
                 if not r: return json_send(self,401,{'error':'Invalid username/email or password'})
                 if r.get('blocked', False): return json_send(self,403,{'error':'Your player account is blocked. Please contact the administrator.'})
                 login_time=now(); players.update_one({'_id':r['_id']},{'$set':{'last_login_at':login_time}}); r['last_login_at']=login_time
@@ -727,31 +645,20 @@ class H(BaseHTTPRequestHandler):
             if p == '/api/logout':
                 token=self.headers.get('Authorization','').replace('Bearer ','').strip(); SESSIONS.pop(token,None); return json_send(self,200,{'ok':True})
 
+            if p == '/api/password-reset/request':
+                identity=str(d.get('identity','')).strip().lower(); uid=str(d.get('uid','')).strip(); phone=re.sub(r'\D','',str(d.get('phone',''))); new_password=str(d.get('new_password',''))
+                if not identity or not uid or not phone or not new_password: return json_send(self,400,{'error':'Free Fire username/Gmail, UID, phone and new password are required'})
+                if len(new_password)<6: return json_send(self,400,{'error':'New password must be at least 6 characters'})
+                player=players.find_one({'$or':[{'username':identity},{'email':identity},{'phone':phone}], 'uid':uid})
+                if not player: return json_send(self,404,{'error':'Account details could not be verified. Check your username/Gmail, UID and phone.'})
+                pending=password_resets.find_one({'player_id':player['_id'],'status':'Pending'})
+                if pending: return json_send(self,409,{'error':'A password reset request is already waiting for admin review'})
+                rr=password_resets.insert_one({'player_id':player['_id'],'username':player.get('username',''),'email':player.get('email',''),'phone':player.get('phone',''),'uid':player.get('uid',''),'new_password_hash':ph(new_password),'status':'Pending','created_at':now(),'reviewed_at':None,'admin_note':''})
+                return json_send(self,200,{'ok':True,'request_id':str(rr.inserted_id)})
+
             s=auth(self)
             if p == '/api/deposit/create' and s:
-                if PAYMENT_PROVIDER != 'razorpay': return json_send(self,503,{'error':'Configured payment provider is not supported'})
-                if not payment_gateway_configured(): return json_send(self,503,{'error':'Razorpay payment gateway is not configured yet. Add the gateway keys in Render Environment Variables.'})
-                try: amt=int(d.get('amount',0))
-                except Exception: amt=0
-                if amt < 10: return json_send(self,400,{'error':'Deposit amount must be at least ₹10'})
-                pid=ObjectId(s['player_id']); player=players.find_one({'_id':pid})
-                if not player: return json_send(self,404,{'error':'Player account not found'})
-                reference='BA-' + secrets.token_hex(10).upper()
-                while deposits.find_one({'reference':reference}): reference='BA-' + secrets.token_hex(10).upper()
-                dep_doc={'player_id':pid,'amount':amt,'reference':reference,'status':'Created','created_at':now(),'submitted_after_payment':False,'gateway':PAYMENT_PROVIDER}
-                try:
-                    ins=deposits.insert_one(dep_doc)
-                    callback_url=f'{PUBLIC_BASE_URL}/player-dashboard.html?payment=success&reference={quote(reference)}'
-                    payload={'amount':amt*100,'currency':'INR','accept_partial':False,'description':f'BOOYAH ARENA wallet deposit ₹{amt}','reference_id':reference,'callback_url':callback_url,'callback_method':'get','reminder_enable':False,'notes':{'deposit_id':str(ins.inserted_id),'player_id':str(pid)}}
-                    link=razorpay_api('/v1/payment_links', payload)
-                    payment_url=link.get('short_url') or link.get('url')
-                    if not payment_url: raise RuntimeError('Razorpay did not return a payment URL')
-                    deposits.update_one({'_id':ins.inserted_id},{'$set':{'gateway_payment_link_id':link.get('id'),'payment_url':payment_url,'gateway_status':link.get('status','created')}})
-                    return json_send(self,200,{'ok':True,'reference':reference,'amount':amt,'status':'Created','payment_url':payment_url})
-                except Exception as exc:
-                    try: deposits.delete_one({'_id':ins.inserted_id})
-                    except Exception: pass
-                    return json_send(self,502,{'error':str(exc)})
+                return json_send(self,410,{'error':'Direct UPI deposits are enabled. Send money to 9940879866 and submit the UTR for admin approval.'})
 
             if p == '/api/notifications/register-token' and s:
                 token=str(d.get('token','')).strip()
@@ -768,10 +675,13 @@ class H(BaseHTTPRequestHandler):
                     players.update_one({'_id':ObjectId(s['player_id'])},{'$pull':{'fcm_tokens':{'token':token}}})
                 return json_send(self,200,{'ok':True})
             if p == '/api/deposit' and s:
-                amt=int(d.get('amount',0)); ref=d.get('reference','').strip()
-                if amt<10 or not ref: return json_send(self,400,{'error':'Deposit amount must be at least ₹10 and transaction ID is required'})
-                if deposits.find_one({'reference':ref}): return json_send(self,409,{'error':'This transaction ID has already been submitted'})
-                deposits.insert_one({'player_id':ObjectId(s['player_id']),'amount':amt,'reference':ref,'status':'Pending','created_at':now(),'submitted_after_payment':True}); return json_send(self,200,{'ok':True})
+                try: amt=int(d.get('amount',0))
+                except Exception: amt=0
+                ref=str(d.get('reference',d.get('utr',''))).strip()
+                if amt<10 or not ref: return json_send(self,400,{'error':'Deposit amount must be at least ₹10 and UTR ID is required'})
+                if not re.match(r'^[A-Za-z0-9_-]{6,30}$',ref): return json_send(self,400,{'error':'Enter a valid UTR / transaction reference (6-30 characters)'})
+                if deposits.find_one({'reference':ref}): return json_send(self,409,{'error':'This UTR has already been submitted'})
+                deposits.insert_one({'player_id':ObjectId(s['player_id']),'amount':amt,'reference':ref,'utr':ref,'status':'Pending','created_at':now(),'submitted_after_payment':True,'payment_method':'Direct UPI','payee_phone':UPI_PHONE,'manual_verification_required':True}); return json_send(self,200,{'ok':True,'status':'Pending','message':'Payment submitted. Points are credited only after admin verification.'})
             if p == '/api/match' and s:
                 t=d.get('tournament'); cfg=config_for(t) if t in tournament_defaults() else None; fee=cfg['entry_fee'] if cfg else None; squad=d.get('squad','').strip()
                 if not fee or not squad:return json_send(self,400,{'error':'Invalid match details'})
@@ -791,30 +701,82 @@ class H(BaseHTTPRequestHandler):
                 matches.insert_one({'player_id':pid,'tournament':t,'squad':squad,'entry_fee':fee,'scheduled_at':scheduled_at,'status':'Upcoming','result':None,'prize':0,'created_at':now()})
                 return json_send(self,200,{'ok':True,'scheduled_at':scheduled_at,'match_capacity':capacity,'players_joined':joined+1})
             if p == '/api/withdraw' and s:
-                amt=int(d.get('amount',0)); method=d.get('method','UPI'); dest=d.get('destination','').strip(); pid=ObjectId(s['player_id'])
-                if amt<50:return json_send(self,400,{'error':'Minimum withdrawal is ₹50'})
-                r=players.find_one({'_id':pid})
-                if amt>r.get('points',0):return json_send(self,400,{'error':'Insufficient wallet points'})
-                if not dest:return json_send(self,400,{'error':'Destination is required'})
-                if withdrawals.find_one({'player_id':pid,'status':'Pending'}):return json_send(self,400,{'error':'You already have a pending withdrawal'})
-                players.update_one({'_id':pid,'points':{'$gte':amt}},{'$inc':{'points':-amt}})
-                withdrawals.insert_one({'player_id':pid,'amount':amt,'method':method,'destination':dest,'status':'Pending','created_at':now(),'completed_at':None,'admin_note':None}); return json_send(self,200,{'ok':True})
-
+                try: amt=int(d.get('amount',0))
+                except (TypeError,ValueError): return json_send(self,400,{'error':'Enter a valid withdrawal amount'})
+                method=str(d.get('method','UPI')).strip()
+                details=d.get('details') or {}
+                legacy_destination=str(d.get('destination','')).strip()
+                pid=ObjectId(s['player_id'])
+                if amt < 50: return json_send(self,400,{'error':'Minimum withdrawal is ₹50'})
+                if method not in ('UPI','Bank transfer'): return json_send(self,400,{'error':'Choose UPI or Bank transfer'})
+                if not isinstance(details,dict): details={}
+                if method == 'UPI':
+                    upi=str(details.get('upi_id') or legacy_destination).strip()
+                    if re.fullmatch(r'\d+',upi):
+                        if not re.fullmatch(r'[6-9]\d{9}',upi): return json_send(self,400,{'error':'Enter a valid 10-digit UPI number'})
+                    elif not re.fullmatch(r'[A-Za-z0-9._-]{2,100}@[A-Za-z0-9._-]{2,50}',upi):
+                        return json_send(self,400,{'error':'Enter a valid UPI ID or 10-digit UPI number'})
+                    clean_details={'upi_id':upi}; destination=upi
+                else:
+                    account=re.sub(r'\s+','',str(details.get('account_number','')))
+                    ifsc=str(details.get('ifsc_code','')).strip().upper()
+                    branch=str(details.get('branch','')).strip()
+                    district=str(details.get('district','')).strip()
+                    pincode=re.sub(r'\D','',str(details.get('pincode','')))
+                    if not re.fullmatch(r'\d{8,30}',account): return json_send(self,400,{'error':'Bank account number must contain 8-30 digits'})
+                    if not re.fullmatch(r'[A-Z]{4}0[A-Z0-9]{6}',ifsc): return json_send(self,400,{'error':'Enter a valid 11-character IFSC code'})
+                    if not branch or len(branch)>100: return json_send(self,400,{'error':'Enter a valid bank branch'})
+                    if not district or len(district)>100: return json_send(self,400,{'error':'Enter a valid district'})
+                    if not re.fullmatch(r'\d{6}',pincode): return json_send(self,400,{'error':'Enter a valid 6-digit pincode'})
+                    clean_details={'account_number':account,'ifsc_code':ifsc,'branch':branch,'district':district,'pincode':pincode}
+                    destination=f'Account {account} · IFSC {ifsc} · {branch}, {district} · {pincode}'
+                r=players.find_one({'_id':pid},{'points':1,'blocked':1})
+                if not r: return json_send(self,404,{'error':'Player account not found'})
+                if r.get('blocked'): return json_send(self,403,{'error':'Your player account is blocked'})
+                if withdrawals.find_one({'player_id':pid,'status':'Pending'}): return json_send(self,409,{'error':'You already have a pending withdrawal'})
+                # Reserve wallet points atomically so two simultaneous requests cannot spend the same balance.
+                reserved=players.update_one({'_id':pid,'points':{'$gte':amt},'blocked':{'$ne':True}},{'$inc':{'points':-amt}})
+                if reserved.modified_count != 1: return json_send(self,400,{'error':'Insufficient wallet points'})
+                try:
+                    wr=withdrawals.insert_one({'player_id':pid,'amount':amt,'method':method,'destination':destination,'payment_details':clean_details,'status':'Pending','created_at':now(),'completed_at':None,'admin_note':None})
+                except Exception:
+                    players.update_one({'_id':pid},{'$inc':{'points':amt}})
+                    raise
+                return json_send(self,200,{'ok':True,'id':str(wr.inserted_id),'status':'Pending'})
             if not auth(self,True): return json_send(self,401,{'error':'Admin login required'})
+            if p == '/api/admin/password-reset/approve':
+                x=password_resets.find_one({'_id':oid(d.get('id')),'status':'Pending'})
+                if not x:return json_send(self,400,{'error':'Password reset request is not pending'})
+                password_resets.update_one({'_id':x['_id']},{'$set':{'status':'Approved','reviewed_at':now(),'admin_note':str(d.get('note','Approved by admin'))[:300]}})
+                players.update_one({'_id':x['player_id']},{'$set':{'password_hash':x['new_password_hash']}})
+                admin_actions.insert_one({'action':'Approve password reset','target_type':'password_reset','target_id':x['_id'],'created_at':now()})
+                return json_send(self,200,{'ok':True})
+            if p == '/api/admin/password-reset/reject':
+                x=password_resets.find_one({'_id':oid(d.get('id')),'status':'Pending'})
+                if not x:return json_send(self,400,{'error':'Password reset request is not pending'})
+                password_resets.update_one({'_id':x['_id']},{'$set':{'status':'Rejected','reviewed_at':now(),'admin_note':str(d.get('note','Rejected by admin'))[:300]}})
+                return json_send(self,200,{'ok':True})
             if p == '/api/admin/deposit/approve':
-                x=deposits.find_one({'_id':oid(d.get('id')),'status':'Pending'})
-                if not x:return json_send(self,400,{'error':'Deposit is not pending'})
-                deposits.update_one({'_id':x['_id']},{'$set':{'status':'Approved','approved_at':now()}}); players.update_one({'_id':x['player_id']},{'$inc':{'points':x['amount']}}); admin_actions.insert_one({'action':'Approve deposit','target_type':'deposit','target_id':x['_id'],'created_at':now()}); return json_send(self,200,{'ok':True})
+                x=deposits.find_one_and_update({'_id':oid(d.get('id')),'status':'Pending'},{'$set':{'status':'Approved','approved_at':now()}}, return_document=ReturnDocument.BEFORE)
+                if not x:return json_send(self,400,{'error':'Deposit is not pending (it may already have been reviewed)'})
+                players.update_one({'_id':x['player_id']},{'$inc':{'points':x['amount']}}); admin_actions.insert_one({'action':'Approve deposit','target_type':'deposit','target_id':x['_id'],'amount':x['amount'],'note':'Manual UTR and received amount verified by admin','created_at':now()}); return json_send(self,200,{'ok':True})
             if p == '/api/admin/deposit/reject':
                 deposits.update_one({'_id':oid(d.get('id')),'status':'Pending'},{'$set':{'status':'Rejected'}}); return json_send(self,200,{'ok':True})
             if p == '/api/admin/withdraw/approve':
-                x=withdrawals.find_one({'_id':oid(d.get('id')),'status':'Pending'})
-                if not x:return json_send(self,400,{'error':'Withdrawal is not pending'})
-                withdrawals.update_one({'_id':x['_id']},{'$set':{'status':'Completed','completed_at':now(),'admin_note':d.get('note','Approved and paid')}}); admin_actions.insert_one({'action':'Complete withdrawal','target_type':'withdrawal','target_id':x['_id'],'created_at':now()}); return json_send(self,200,{'ok':True})
+                wid=oid(d.get('id'))
+                if not wid:return json_send(self,400,{'error':'Invalid withdrawal ID'})
+                x=withdrawals.find_one_and_update({'_id':wid,'status':'Pending'},{'$set':{'status':'Completed','completed_at':now(),'admin_note':str(d.get('note','Approved and paid'))[:300]}},return_document=ReturnDocument.BEFORE)
+                if not x:return json_send(self,400,{'error':'Withdrawal is not pending (it may already have been reviewed)'})
+                admin_actions.insert_one({'action':'Complete withdrawal','target_type':'withdrawal','target_id':x['_id'],'amount':x.get('amount',0),'created_at':now()})
+                return json_send(self,200,{'ok':True,'status':'Completed'})
             if p == '/api/admin/withdraw/reject':
-                x=withdrawals.find_one({'_id':oid(d.get('id')),'status':'Pending'})
-                if not x:return json_send(self,400,{'error':'Withdrawal is not pending'})
-                withdrawals.update_one({'_id':x['_id']},{'$set':{'status':'Rejected','completed_at':now(),'admin_note':d.get('note','Rejected')}}); players.update_one({'_id':x['player_id']},{'$inc':{'points':x['amount']}}); return json_send(self,200,{'ok':True})
+                wid=oid(d.get('id'))
+                if not wid:return json_send(self,400,{'error':'Invalid withdrawal ID'})
+                x=withdrawals.find_one_and_update({'_id':wid,'status':'Pending'},{'$set':{'status':'Rejected','completed_at':now(),'admin_note':str(d.get('note','Rejected'))[:300]}},return_document=ReturnDocument.BEFORE)
+                if not x:return json_send(self,400,{'error':'Withdrawal is not pending (it may already have been reviewed)'})
+                players.update_one({'_id':x['player_id']},{'$inc':{'points':int(x.get('amount',0))}})
+                admin_actions.insert_one({'action':'Reject withdrawal','target_type':'withdrawal','target_id':x['_id'],'amount':x.get('amount',0),'created_at':now()})
+                return json_send(self,200,{'ok':True,'status':'Rejected','refunded':int(x.get('amount',0))})
             if p == '/api/admin/referrals':
                 rows=[]
                 for r in referrals.find({}).sort('_id',-1):
